@@ -681,130 +681,453 @@ context_middleware = ContextAwareMiddleware(get_app_context)
 
 #### 1. ロギングミドルウェア
 
+##### ミドルウェア単体
+
 ```python
-def logging_middleware(get_state, dispatch):
-    def middleware(next_dispatch):
-        def handle_action(action):
-            logging.info(f"処理前のアクション: {action}")
+import logging
+from typing import Dict, Any, Callable
+
+logging.basicConfig(level=logging.INFO)
+
+def logging_middleware(get_state: Callable, dispatch: Callable):
+    def middleware(next_dispatch: Callable):
+        def handle_action(action: Dict[str, Any]):
+            logging.info(f"Dispatching action: {action}")
             result = next_dispatch(action)
-            logging.info(f"処理後の新しい状態: {get_state()}")
+            logging.info(f"New state: {get_state()}")
             return result
         return handle_action
     return middleware
 ```
 
-**特徴:**
+##### 特徴
 
 - アクションのディスパッチ前後で状態をログに記録
 - デバッグや監視に有用
 - アプリケーションの動作に影響を与えない
 
-**使用場面:** 開発環境でのデバッグ、本番環境での監視
+##### 使用例
+
+```python
+def counter_reducer(state: Dict[str, int], action: Dict[str, str]) -> Dict[str, int]:
+    if action['type'] == 'INCREMENT':
+        return {'count': state['count'] + 1}
+    elif action['type'] == 'DECREMENT':
+        return {'count': state['count'] - 1}
+    return state
+
+class Store:
+    def __init__(self, reducer, initial_state):
+        self.state = initial_state
+        self.reducer = reducer
+        self.listeners = []
+        self.middleware = []
+
+    def get_state(self):
+        return self.state
+
+    def dispatch(self, action):
+        for m in self.middleware:
+            action = m(self.get_state, self.dispatch)(lambda x: x)(action)
+        self.state = self.reducer(self.state, action)
+        for listener in self.listeners:
+            listener()
+
+    def subscribe(self, listener):
+        self.listeners.append(listener)
+
+    def add_middleware(self, middleware):
+        self.middleware.append(middleware)
+
+class CounterView:
+    def __init__(self, store):
+        self.store = store
+        self.store.subscribe(self.render)
+
+    def render(self):
+        print(f"Current count: {self.store.get_state()['count']}")
+
+    def increment(self):
+        self.store.dispatch({'type': 'INCREMENT'})
+
+    def decrement(self):
+        self.store.dispatch({'type': 'DECREMENT'})
+
+store = Store(counter_reducer, {'count': 0})
+store.add_middleware(logging_middleware)
+view = CounterView(store)
+
+view.increment()
+view.increment()
+view.decrement()
+```
+
+使用場面: 開発環境でのデバッグ、本番環境での監視
 
 ### 5.2 レベル2: 条件付き処理と単純な状態操作
 
 #### 2. エラーハンドリングミドルウェア
 
+##### ミドルウェア単体
+
 ```python
-def error_handling_middleware(get_state, dispatch):
-    def middleware(next_dispatch):
-        def handle_action(action):
+import logging
+from typing import Dict, Any, Callable
+
+logging.basicConfig(level=logging.ERROR)
+
+def error_handling_middleware(get_state: Callable, dispatch: Callable):
+    def middleware(next_dispatch: Callable):
+        def handle_action(action: Dict[str, Any]):
             try:
                 return next_dispatch(action)
             except Exception as e:
-                logging.error(f"エラーが発生しました: {str(e)}")
-                return None
+                logging.error(f"Error occurred: {str(e)}")
+                return {'type': 'ERROR', 'error': str(e)}
         return handle_action
     return middleware
 ```
 
-**特徴:**
+##### 特徴
 
 - アクション処理中の例外をキャッチし、ログに記録
 - アプリケーションのクラッシュを防止
 
-**使用場面:** 予期せぬエラーの処理、アプリケーションの安定性向上
+##### 使用例
+
+```python
+def calculator_reducer(state: Dict[str, float], action: Dict[str, Any]) -> Dict[str, float]:
+    if action['type'] == 'DIVIDE':
+        if action['divisor'] == 0:
+            raise ValueError("Cannot divide by zero")
+        return {'result': state['value'] / action['divisor']}
+    return state
+
+class Store:
+    def __init__(self, reducer, initial_state):
+        self.state = initial_state
+        self.reducer = reducer
+        self.listeners = []
+        self.middleware = []
+
+    def get_state(self):
+        return self.state
+
+    def dispatch(self, action):
+        for m in self.middleware:
+            action = m(self.get_state, self.dispatch)(lambda x: x)(action)
+        self.state = self.reducer(self.state, action)
+        for listener in self.listeners:
+            listener()
+
+    def subscribe(self, listener):
+        self.listeners.append(listener)
+
+    def add_middleware(self, middleware):
+        self.middleware.append(middleware)
+
+class CalculatorView:
+    def __init__(self, store):
+        self.store = store
+        self.store.subscribe(self.render)
+
+    def render(self):
+        state = self.store.get_state()
+        if 'error' in state:
+            print(f"Error: {state['error']}")
+        else:
+            print(f"Result: {state.get('result', 'N/A')}")
+
+    def divide(self, divisor):
+        self.store.dispatch({'type': 'DIVIDE', 'divisor': divisor})
+
+store = Store(calculator_reducer, {'value': 10})
+store.add_middleware(error_handling_middleware)
+view = CalculatorView(store)
+
+view.divide(2)
+view.divide(0)
+```
+
+使用場面: 予期せぬエラーの処理、アプリケーションの安定性向上
 
 #### 3. バリデーションミドルウェア
 
+##### ミドルウェア単体
+
 ```python
-def validation_middleware(get_state, dispatch):
-    def middleware(next_dispatch):
-        def handle_action(action):
-            if action["type"] == "ADD_TODO":
-                if not isinstance(action["text"], str) or len(action["text"]) == 0:
-                    raise ValueError("TODOのテキストは空でない文字列である必要があります")
+from typing import Dict, Any, Callable
+
+def validation_middleware(get_state: Callable, dispatch: Callable):
+    def middleware(next_dispatch: Callable):
+        def handle_action(action: Dict[str, Any]):
+            if action['type'] == 'ADD_USER':
+                if not action['user'].get('name') or not action['user'].get('email'):
+                    return {'type': 'VALIDATION_ERROR', 'error': 'Name and email are required'}
             return next_dispatch(action)
         return handle_action
     return middleware
 ```
 
-**特徴:**
+##### 特徴
 
 - アクションのペイロードを検証
 - 不正なデータの流入を防止
 
-**使用場面:** ユーザー入力の検証、データ整合性の確保
+##### 使用例
+
+```python
+def user_reducer(state: Dict[str, list], action: Dict[str, Any]) -> Dict[str, list]:
+    if action['type'] == 'ADD_USER':
+        return {'users': state['users'] + [action['user']]}
+    return state
+
+class Store:
+    def __init__(self, reducer, initial_state):
+        self.state = initial_state
+        self.reducer = reducer
+        self.listeners = []
+        self.middleware = []
+
+    def get_state(self):
+        return self.state
+
+    def dispatch(self, action):
+        for m in self.middleware:
+            action = m(self.get_state, self.dispatch)(lambda x: x)(action)
+        self.state = self.reducer(self.state, action)
+        for listener in self.listeners:
+            listener()
+
+    def subscribe(self, listener):
+        self.listeners.append(listener)
+
+    def add_middleware(self, middleware):
+        self.middleware.append(middleware)
+
+class UserView:
+    def __init__(self, store):
+        self.store = store
+        self.store.subscribe(self.render)
+
+    def render(self):
+        state = self.store.get_state()
+        if 'error' in state:
+            print(f"Error: {state['error']}")
+        else:
+            print("Users:")
+            for user in state['users']:
+                print(f"- {user['name']} ({user['email']})")
+
+    def add_user(self, name, email):
+        self.store.dispatch({'type': 'ADD_USER', 'user': {'name': name, 'email': email}})
+
+store = Store(user_reducer, {'users': []})
+store.add_middleware(validation_middleware)
+view = UserView(store)
+
+view.add_user("Alice", "alice@example.com")
+view.add_user("", "bob@example.com")
+```
+
+使用場面: ユーザー入力の検証、データ整合性の確保
 
 ### 5.3 レベル3: 高度な状態操作と最適化
 
 #### 4. キャッシュミドルウェア
 
+##### ミドルウェア単体
+
 ```python
-def cache_middleware(get_state, dispatch):
+import time
+from typing import Dict, Any, Callable
+
+def cache_middleware(get_state: Callable, dispatch: Callable):
     cache = {}
-    def middleware(next_dispatch):
-        def handle_action(action):
-            if action["type"] == "CACHED_ACTION":
-                if action["key"] in cache:
-                    return cache[action["key"]]
+    def middleware(next_dispatch: Callable):
+        def handle_action(action: Dict[str, Any]):
+            if action['type'] == 'FETCH_USER':
+                if action['id'] in cache:
+                    print("Fetching from cache")
+                    return {'type': 'FETCH_USER_SUCCESS', 'user': cache[action['id']]}
             result = next_dispatch(action)
-            if action["type"] == "CACHED_ACTION":
-                cache[action["key"]] = result
+            if action['type'] == 'FETCH_USER_SUCCESS':
+                cache[result['user']['id']] = result['user']
             return result
         return handle_action
     return middleware
 ```
 
-**特徴:**
+##### 特徴
 
 - 特定のアクション結果をキャッシュ
 - パフォーマンスの最適化
 
-**使用場面:** 頻繁に発生する同一アクションの処理、計算コストの高い操作の結果保存
+##### 使用例
+
+```python
+def user_reducer(state: Dict[str, Dict], action: Dict[str, Any]) -> Dict[str, Dict]:
+    if action['type'] == 'FETCH_USER_SUCCESS':
+        return {'currentUser': action['user']}
+    return state
+
+class Store:
+    def __init__(self, reducer, initial_state):
+        self.state = initial_state
+        self.reducer = reducer
+        self.listeners = []
+        self.middleware = []
+
+    def get_state(self):
+        return self.state
+
+    def dispatch(self, action):
+        for m in self.middleware:
+            action = m(self.get_state, self.dispatch)(lambda x: x)(action)
+        self.state = self.reducer(self.state, action)
+        for listener in self.listeners:
+            listener()
+
+    def subscribe(self, listener):
+        self.listeners.append(listener)
+
+    def add_middleware(self, middleware):
+        self.middleware.append(middleware)
+
+class UserProfileView:
+    def __init__(self, store):
+        self.store = store
+        self.store.subscribe(self.render)
+
+    def render(self):
+        user = self.store.get_state().get('currentUser')
+        if user:
+            print(f"User Profile: {user['name']} (ID: {user['id']})")
+        else:
+            print("No user loaded")
+
+    def fetch_user(self, user_id):
+        self.store.dispatch({'type': 'FETCH_USER', 'id': user_id})
+
+def fetch_user_from_api(user_id):
+    time.sleep(1)  # Simulate API call
+    return {'id': user_id, 'name': f'User {user_id}'}
+
+def user_fetcher(store):
+    def thunk(dispatch, get_state):
+        user_id = get_state().get('fetchUserId')
+        user = fetch_user_from_api(user_id)
+        dispatch({'type': 'FETCH_USER_SUCCESS', 'user': user})
+    return thunk
+
+store = Store(user_reducer, {})
+store.add_middleware(cache_middleware)
+view = UserProfileView(store)
+
+view.fetch_user(1)
+view.fetch_user(1)  # This should use cache
+```
+
+使用場面: 頻繁に発生する同一アクションの処理、計算コストの高い操作の結果保存
 
 #### 5. スロットリングミドルウェア
 
+##### ミドルウェア単体
+
 ```python
-def throttle_middleware(get_state, dispatch):
+import time
+from typing import Dict, Any, Callable
+
+def throttle_middleware(get_state: Callable, dispatch: Callable):
     last_action_time = {}
-    def middleware(next_dispatch):
-        def handle_action(action):
+    def middleware(next_dispatch: Callable):
+        def handle_action(action: Dict[str, Any]):
             current_time = time.time()
-            if action["type"] in last_action_time:
-                if current_time - last_action_time[action["type"]] < 1:  # 1秒以内の同じタイプのアクションをスロットル
+            if action['type'] in last_action_time:
+                if current_time - last_action_time[action['type']] < 1:
+                    print(f"Action {action['type']} throttled")
                     return None
-            last_action_time[action["type"]] = current_time
+            last_action_time[action['type']] = current_time
             return next_dispatch(action)
         return handle_action
     return middleware
 ```
 
-**特徴:**
+##### 特徴
 
 - 特定のアクションの頻度を制限
 - システムの過負荷を防止
 
-**使用場面:** ユーザーの連続した操作の制限、APIリクエストの制御
+##### 使用例
+
+```python
+def search_reducer(state: Dict[str, Any], action: Dict[str, Any]) -> Dict[str, Any]:
+    if action['type'] == 'SEARCH':
+        return {'searchTerm': action['term'], 'results': [f"Result for {action['term']}"]}
+    return state
+
+class Store:
+    def __init__(self, reducer, initial_state):
+        self.state = initial_state
+        self.reducer = reducer
+        self.listeners = []
+        self.middleware = []
+
+    def get_state(self):
+        return self.state
+
+    def dispatch(self, action):
+        for m in self.middleware:
+            action = m(self.get_state, self.dispatch)(lambda x: x)(action)
+        if action is not None:
+            self.state = self.reducer(self.state, action)
+            for listener in self.listeners:
+                listener()
+
+    def subscribe(self, listener):
+        self.listeners.append(listener)
+
+    def add_middleware(self, middleware):
+        self.middleware.append(middleware)
+
+class SearchView:
+    def __init__(self, store):
+        self.store = store
+        self.store.subscribe(self.render)
+
+    def render(self):
+        state = self.store.get_state()
+        print(f"Search term: {state.get('searchTerm', '')}")
+        print("Results:", state.get('results', []))
+
+    def search(self, term):
+        self.store.dispatch({'type': 'SEARCH', 'term': term})
+
+store = Store(search_reducer, {})
+store.add_middleware(throttle_middleware)
+view = SearchView(store)
+
+view.search("Python")
+time.sleep(0.5)
+view.search("Python programming")  # This should be throttled
+time.sleep(1)
+view.search("Python programming")  # This should go through
+```
+
+使用場面: ユーザーの連続した操作の制限、APIリクエストの制御
 
 ### 5.4 レベル4: 非同期処理と高度な制御フロー
 
 #### 6. Thunkミドルウェア
 
+##### ミドルウェア単体
+
 ```python
-def thunk_middleware(get_state, dispatch):
-    def middleware(next_dispatch):
-        def handle_action(action):
+from typing import Dict, Any, Callable
+
+def thunk_middleware(get_state: Callable, dispatch: Callable):
+    def middleware(next_dispatch: Callable):
+        def handle_action(action: Any):
             if callable(action):
                 return action(dispatch, get_state)
             return next_dispatch(action)
@@ -812,81 +1135,359 @@ def thunk_middleware(get_state, dispatch):
     return middleware
 ```
 
-**特徴:**
+##### 特徴
 
 - 関数をアクションとして扱うことが可能
 - 非同期処理や複雑なロジックの実装をサポート
 
-**使用場面:** API呼び出し、複数のアクションの連鎖的なディスパッチ
-
-#### 7. 非同期ミドルウェア
+##### 使用例
 
 ```python
 import asyncio
+from typing import Dict, Any, Callable
 
-def async_middleware(get_state, dispatch):
-    async def middleware(next_dispatch):
-        async def handle_action(action):
-            if isinstance(action, dict) and action.get("type") == "ASYNC_ACTION":
-                await asyncio.sleep(1)  # 非同期操作のシミュレーション
-                return next_dispatch({"type": "SYNC_ACTION", "data": "非同期処理の結果"})
-            return next_dispatch(action)
+async def fetch_user(user_id: int) -> Dict[str, Any]:
+    await asyncio.sleep(1)  # Simulate API call
+    return {"id": user_id, "name": f"User {user_id}"}
+
+async def save_todo(user_id: int, todo_text: str) -> Dict[str, Any]:
+    await asyncio.sleep(0.5)  # Simulate database save
+    return {"id": 1, "user_id": user_id, "text": todo_text}
+
+def add_todo_for_user(user_id: int, todo_text: str):
+    async def thunk(dispatch, get_state):
+        user = await fetch_user(user_id)
+        if user:
+            todo = await save_todo(user_id, todo_text)
+            await dispatch({"type": "ADD_TODO", "todo": todo})
+        else:
+            await dispatch({"type": "ADD_TODO_ERROR", "error": f"User with ID {user_id} not found"})
+    return thunk
+
+def todo_reducer(state: Dict[str, Any], action: Dict[str, Any]) -> Dict[str, Any]:
+    if action['type'] == 'ADD_TODO':
+        return {**state, 'todos': state['todos'] + [action['todo']]}
+    elif action['type'] == 'ADD_TODO_ERROR':
+        return {**state, 'error': action['error']}
+    return state
+
+class AsyncStore:
+    def __init__(self, reducer, initial_state):
+        self.state = initial_state
+        self.reducer = reducer
+        self.listeners = []
+        self.middleware = []
+
+    def get_state(self):
+        return self.state
+
+    async def dispatch(self, action):
+        for m in self.middleware:
+            middleware = m(self.get_state, self.dispatch)
+            action = await middleware(lambda x: x)(action)
+        self.state = self.reducer(self.state, action)
+        for listener in self.listeners:
+            listener()
+
+    def subscribe(self, listener):
+        self.listeners.append(listener)
+
+    def add_middleware(self, middleware):
+        self.middleware.append(middleware)
+
+class TodoView:
+    def __init__(self, store):
+        self.store = store
+        self.store.subscribe(self.render)
+
+    def render(self):
+        state = self.store.get_state()
+        print("\nTODO List:")
+        for todo in state.get('todos', []):
+            print(f"- User {todo['user_id']}: {todo['text']}")
+        if state.get('error'):
+            print(f"Error: {state['error']}")
+
+    async def add_todo(self, user_id: int, todo_text: str):
+        await self.store.dispatch(add_todo_for_user(user_id, todo_text))
+
+async def main():
+    store = AsyncStore(todo_reducer, {'todos': [], 'error': None})
+    store.add_middleware(thunk_middleware)
+    view = TodoView(store)
+    
+    await view.add_todo(1, "Buy milk")
+    await view.add_todo(2, "Write report")
+    await view.add_todo(999, "Invalid user's TODO")
+
+asyncio.run(main())
+```
+
+使用場面: API呼び出し、複数のアクションの連鎖的なディスパッチ
+
+#### 7. 非同期ミドルウェア
+
+##### ミドルウェア単体
+
+```python
+import asyncio
+from typing import Dict, Any, Callable
+
+async def async_middleware(get_state: Callable, dispatch: Callable):
+    async def middleware(next_dispatch: Callable):
+        async def handle_action(action: Dict[str, Any]):
+            if action.get("type") == "ASYNC_ACTION":
+                await asyncio.sleep(1)  # Simulate async operation
+                return await dispatch({"type": "SYNC_ACTION", "data": "Async operation result"})
+            return await next_dispatch(action)
         return handle_action
     return middleware
 ```
 
-**特徴:**
+##### 特徴
 
 - 非同期アクションの処理をサポート
 - I/O処理やネットワーク要求の効率的な処理
 
-**使用場面:** データベース操作、外部APIとの通信
+##### 使用例
+
+```python
+def async_reducer(state: Dict[str, Any], action: Dict[str, Any]) -> Dict[str, Any]:
+    if action['type'] == 'SYNC_ACTION':
+        return {'result': action['data']}
+    return state
+
+class AsyncStore:
+    def __init__(self, reducer, initial_state):
+        self.state = initial_state
+        self.reducer = reducer
+        self.listeners = []
+        self.middleware = []
+
+    def get_state(self):
+        return self.state
+
+    async def dispatch(self, action):
+        for m in self.middleware:
+            middleware = await m(self.get_state, self.dispatch)
+            action = await middleware(lambda x: x)(action)
+        self.state = self.reducer(self.state, action)
+        for listener in self.listeners:
+            listener()
+
+    def subscribe(self, listener):
+        self.listeners.append(listener)
+
+    def add_middleware(self, middleware):
+        self.middleware.append(middleware)
+
+class AsyncView:
+    def __init__(self, store):
+        self.store = store
+        self.store.subscribe(self.render)
+
+    def render(self):
+        print(f"Result: {self.store.get_state().get('result', 'No result yet')}")
+
+    async def trigger_async_action(self):
+        await self.store.dispatch({"type": "ASYNC_ACTION"})
+
+async def main():
+    store = AsyncStore(async_reducer, {})
+    store.add_middleware(async_middleware)
+    view = AsyncView(store)
+
+    print("Triggering async action...")
+    await view.trigger_async_action()
+
+asyncio.run(main())
+```
+
+使用場面: データベース操作、外部APIとの通信
 
 ### 5.5 レベル5: 高度なアプリケーション制御
 
 #### 8. 認証ミドルウェア
 
+##### ミドルウェア単体
+
 ```python
-def auth_middleware(get_state, dispatch):
-    def middleware(next_dispatch):
-        def handle_action(action):
-            if action["type"] == "PROTECTED_ACTION" and not get_state().get("authenticated", False):
-                raise PermissionError("この操作には認証が必要です")
+from typing import Dict, Any, Callable
+
+def auth_middleware(get_state: Callable, dispatch: Callable):
+    def middleware(next_dispatch: Callable):
+        def handle_action(action: Dict[str, Any]):
+            if action['type'] == 'PROTECTED_ACTION' and not get_state().get('authenticated', False):
+                return {'type': 'AUTH_ERROR', 'error': 'Authentication required'}
             return next_dispatch(action)
         return handle_action
     return middleware
 ```
 
-**特徴:**
+##### 特徴
 
 - ユーザーの認証状態に基づいてアクションを制御
 - セキュリティの向上
 
-**使用場面:** 保護されたリソースへのアクセス制御、ユーザー権限の管理
+##### 使用例
+
+```python
+def auth_reducer(state: Dict[str, Any], action: Dict[str, Any]) -> Dict[str, Any]:
+    if action['type'] == 'LOGIN':
+        return {**state, 'authenticated': True}
+    elif action['type'] == 'LOGOUT':
+        return {**state, 'authenticated': False}
+    elif action['type'] == 'PROTECTED_ACTION':
+        return {**state, 'protectedData': 'Secret data'}
+    elif action['type'] == 'AUTH_ERROR':
+        return {**state, 'error': action['error']}
+    return state
+
+class Store:
+    def __init__(self, reducer, initial_state):
+        self.state = initial_state
+        self.reducer = reducer
+        self.listeners = []
+        self.middleware = []
+
+    def get_state(self):
+        return self.state
+
+    def dispatch(self, action):
+        for m in self.middleware:
+            action = m(self.get_state, self.dispatch)(lambda x: x)(action)
+        self.state = self.reducer(self.state, action)
+        for listener in self.listeners:
+            listener()
+
+    def subscribe(self, listener):
+        self.listeners.append(listener)
+
+    def add_middleware(self, middleware):
+        self.middleware.append(middleware)
+
+class AuthView:
+    def __init__(self, store):
+        self.store = store
+        self.store.subscribe(self.render)
+
+    def render(self):
+        state = self.store.get_state()
+        print(f"Auth state: {'Authenticated' if state.get('authenticated') else 'Not authenticated'}")
+        if state.get('protectedData'):
+            print(f"Protected data: {state['protectedData']}")
+        if state.get('error'):
+            print(f"Error: {state['error']}")
+
+    def login(self):
+        self.store.dispatch({'type': 'LOGIN'})
+
+    def logout(self):
+        self.store.dispatch({'type': 'LOGOUT'})
+
+    def access_protected_data(self):
+        self.store.dispatch({'type': 'PROTECTED_ACTION'})
+
+store = Store(auth_reducer, {'authenticated': False})
+store.add_middleware(auth_middleware)
+view = AuthView(store)
+
+view.access_protected_data()  # Should fail
+view.login()
+view.access_protected_data()  # Should succeed
+view.logout()
+view.access_protected_data()  # Should fail again
+```
+
+使用場面: 保護されたリソースへのアクセス制御、ユーザー権限の管理
 
 #### 9. タイミングミドルウェア
 
+##### ミドルウェア単体
+
 ```python
-def timing_middleware(get_state, dispatch):
-    def middleware(next_dispatch):
-        def handle_action(action):
+import time
+from typing import Dict, Any, Callable
+
+def timing_middleware(get_state: Callable, dispatch: Callable):
+    def middleware(next_dispatch: Callable):
+        def handle_action(action: Dict[str, Any]):
             start_time = time.time()
             result = next_dispatch(action)
             end_time = time.time()
-            logging.info(f"アクション '{action['type']}' の処理時間: {end_time - start_time:.4f} 秒")
+            print(f"Action '{action['type']}' took {end_time - start_time:.4f} seconds")
             return result
         return handle_action
     return middleware
 ```
 
-**特徴:**
+##### 特徴
 
 - アクションの処理時間を測定
 - パフォーマンスのボトルネックを特定
 
-**使用場面:** パフォーマンス最適化、処理時間の長いアクションの特定
+##### 使用例
 
-これらのミドルウェアは、アプリケーションの要件に応じて組み合わせて使用することができます。より低レベルのミドルウェアは基本的な機能を提供し、高レベルのミドルウェアはより複雑で特殊な処理を行います。適切なミドルウェアを選択し組み合わせることで、柔軟で強力なアプリケーション制御が可能になります。
+```python
+def complex_reducer(state: Dict[str, Any], action: Dict[str, Any]) -> Dict[str, Any]:
+    if action['type'] == 'PROCESS_DATA':
+        # Simulate a complex operation
+        time.sleep(action['complexity'] * 0.1)
+        return {**state, 'processedData': f"Processed data with complexity {action['complexity']}"}
+    return state
+
+class Store:
+    def __init__(self, reducer, initial_state):
+        self.state = initial_state
+        self.reducer = reducer
+        self.listeners = []
+        self.middleware = []
+
+    def get_state(self):
+        return self.state
+
+    def dispatch(self, action):
+        for m in self.middleware:
+            action = m(self.get_state, self.dispatch)(lambda x: x)(action)
+        self.state = self.reducer(self.state, action)
+        for listener in self.listeners:
+            listener()
+
+    def subscribe(self, listener):
+        self.listeners.append(listener)
+
+    def add_middleware(self, middleware):
+        self.middleware.append(middleware)
+
+class DataProcessingView:
+    def __init__(self, store):
+        self.store = store
+        self.store.subscribe(self.render)
+
+    def render(self):
+        state = self.store.get_state()
+        if state.get('processedData'):
+            print(f"Processed data: {state['processedData']}")
+
+    def process_data(self, complexity):
+        self.store.dispatch({'type': 'PROCESS_DATA', 'complexity': complexity})
+
+store = Store(complex_reducer, {})
+store.add_middleware(timing_middleware)
+view = DataProcessingView(store)
+
+view.process_data(1)  # Simple process
+view.process_data(5)  # More complex process
+view.process_data(10)  # Very complex process
+```
+
+使用場面: パフォーマンス最適化、処理時間の長いアクションの特定
+
+これらの9種類のミドルウェアは、アプリケーションの要件に応じて組み合わせて使用することができます。より低レベルのミドルウェアは基本的な機能を提供し、高レベルのミドルウェアはより複雑で特殊な処理を行います。適切なミドルウェアを選択し組み合わせることで、柔軟で強力なアプリケーション制御が可能になります。
+
+各ミドルウェアは、特定の問題を解決するために設計されており、アプリケーションの複雑さや規模に応じて適用することができます。例えば、小規模なアプリケーションでは基本的なロギングミドルウェアから始め、アプリケーションの成長に伴って認証ミドルウェアやキャッシュミドルウェアなどを追加していくことができます。
+
+ミドルウェアの使用は、アプリケーションのコア機能とクロスカッティングコンサーンを分離するのに役立ち、コードの保守性と再利用性を向上させます。また、ミドルウェアを適切に組み合わせることで、アプリケーションの動作をカスタマイズし、特定の要件に合わせて最適化することができます。
 
 ## 6. まとめと発展的なトピック
 
