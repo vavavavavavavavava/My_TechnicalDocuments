@@ -681,7 +681,7 @@ context_middleware = ContextAwareMiddleware(get_app_context)
 
 #### 1. ロギングミドルウェア
 
-##### ミドルウェア単体
+ミドルウェア単体:
 
 ```python
 import logging
@@ -700,13 +700,13 @@ def logging_middleware(get_state: Callable, dispatch: Callable):
     return middleware
 ```
 
-##### 特徴
+特徴:
 
 - アクションのディスパッチ前後で状態をログに記録
 - デバッグや監視に有用
 - アプリケーションの動作に影響を与えない
 
-##### 使用例
+使用例:
 
 ```python
 def counter_reducer(state: Dict[str, int], action: Dict[str, str]) -> Dict[str, int]:
@@ -768,7 +768,7 @@ view.decrement()
 
 #### 2. エラーハンドリングミドルウェア
 
-##### ミドルウェア単体
+ミドルウェア単体:
 
 ```python
 import logging
@@ -788,12 +788,12 @@ def error_handling_middleware(get_state: Callable, dispatch: Callable):
     return middleware
 ```
 
-##### 特徴
+特徴:
 
 - アクション処理中の例外をキャッチし、ログに記録
 - アプリケーションのクラッシュを防止
 
-##### 使用例
+使用例:
 
 ```python
 def calculator_reducer(state: Dict[str, float], action: Dict[str, Any]) -> Dict[str, float]:
@@ -853,7 +853,7 @@ view.divide(0)
 
 #### 3. バリデーションミドルウェア
 
-##### ミドルウェア単体
+ミドルウェア単体:
 
 ```python
 from typing import Dict, Any, Callable
@@ -869,12 +869,12 @@ def validation_middleware(get_state: Callable, dispatch: Callable):
     return middleware
 ```
 
-##### 特徴
+特徴:
 
 - アクションのペイロードを検証
 - 不正なデータの流入を防止
 
-##### 使用例
+使用例:
 
 ```python
 def user_reducer(state: Dict[str, list], action: Dict[str, Any]) -> Dict[str, list]:
@@ -936,7 +936,7 @@ view.add_user("", "bob@example.com")
 
 #### 4. キャッシュミドルウェア
 
-##### ミドルウェア単体
+ミドルウェア単体:
 
 ```python
 import time
@@ -958,12 +958,12 @@ def cache_middleware(get_state: Callable, dispatch: Callable):
     return middleware
 ```
 
-##### 特徴
+特徴:
 
 - 特定のアクション結果をキャッシュ
 - パフォーマンスの最適化
 
-##### 使用例
+使用例:
 
 ```python
 def user_reducer(state: Dict[str, Dict], action: Dict[str, Any]) -> Dict[str, Dict]:
@@ -1032,7 +1032,7 @@ view.fetch_user(1)  # This should use cache
 
 #### 5. スロットリングミドルウェア
 
-##### ミドルウェア単体
+ミドルウェア単体:
 
 ```python
 import time
@@ -1053,12 +1053,12 @@ def throttle_middleware(get_state: Callable, dispatch: Callable):
     return middleware
 ```
 
-##### 特徴
+特徴:
 
 - 特定のアクションの頻度を制限
 - システムの過負荷を防止
 
-##### 使用例
+使用例:
 
 ```python
 def search_reducer(state: Dict[str, Any], action: Dict[str, Any]) -> Dict[str, Any]:
@@ -1120,7 +1120,7 @@ view.search("Python programming")  # This should go through
 
 #### 6. Thunkミドルウェア
 
-##### ミドルウェア単体
+ミドルウェア単体:
 
 ```python
 from typing import Dict, Any, Callable
@@ -1135,12 +1135,12 @@ def thunk_middleware(get_state: Callable, dispatch: Callable):
     return middleware
 ```
 
-##### 特徴
+特徴:
 
 - 関数をアクションとして扱うことが可能
 - 非同期処理や複雑なロジックの実装をサポート
 
-##### 使用例
+使用例:
 
 ```python
 import asyncio
@@ -1227,7 +1227,7 @@ asyncio.run(main())
 
 #### 7. 非同期ミドルウェア
 
-##### ミドルウェア単体
+ミドルウェア単体:
 
 ```python
 import asyncio
@@ -1244,12 +1244,12 @@ async def async_middleware(get_state: Callable, dispatch: Callable):
     return middleware
 ```
 
-##### 特徴
+特徴:
 
 - 非同期アクションの処理をサポート
 - I/O処理やネットワーク要求の効率的な処理
 
-##### 使用例
+使用例:
 
 ```python
 def async_reducer(state: Dict[str, Any], action: Dict[str, Any]) -> Dict[str, Any]:
@@ -1309,7 +1309,7 @@ asyncio.run(main())
 
 #### 8. 認証ミドルウェア
 
-##### ミドルウェア単体
+ミドルウェア単体:
 
 ```python
 from typing import Dict, Any, Callable
@@ -1324,12 +1324,12 @@ def auth_middleware(get_state: Callable, dispatch: Callable):
     return middleware
 ```
 
-##### 特徴
+特徴:
 
 - ユーザーの認証状態に基づいてアクションを制御
 - セキュリティの向上
 
-##### 使用例
+使用例:
 
 ```python
 def auth_reducer(state: Dict[str, Any], action: Dict[str, Any]) -> Dict[str, Any]:
@@ -1403,7 +1403,7 @@ view.access_protected_data()  # Should fail again
 
 #### 9. タイミングミドルウェア
 
-##### ミドルウェア単体
+ミドルウェア単体:
 
 ```python
 import time
@@ -1421,12 +1421,12 @@ def timing_middleware(get_state: Callable, dispatch: Callable):
     return middleware
 ```
 
-##### 特徴
+特徴:
 
 - アクションの処理時間を測定
 - パフォーマンスのボトルネックを特定
 
-##### 使用例
+使用例:
 
 ```python
 def complex_reducer(state: Dict[str, Any], action: Dict[str, Any]) -> Dict[str, Any]:
