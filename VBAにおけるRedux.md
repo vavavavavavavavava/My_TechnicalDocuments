@@ -21,11 +21,109 @@ Public Type Action
     Payload As Variant
 End Type
 
+' アクションクリエイターモジュール (ActionCreators.bas)
+Public Function IncrementAction() As Action
+    IncrementAction.Type = ActionType.INCREMENT
+End Function
+
+Public Function DecrementAction() As Action
+    DecrementAction.Type = ActionType.DECREMENT
+End Function
+
+Public Function ResetAction() As Action
+    ResetAction.Type = ActionType.RESET
+End Function
+
+Public Function AddAction(ByVal Value As Long) As Action
+    AddAction.Type = ActionType.ADD
+    AddAction.Payload = Value
+End Function
+
+Public Function AsyncIncrementAction() As Action
+    AsyncIncrementAction.Type = ActionType.ASYNC_INCREMENT_START
+End Function
+
+Public Function AsyncIncrementCompleteAction() As Action
+    AsyncIncrementCompleteAction.Type = ActionType.ASYNC_INCREMENT_COMPLETE
+End Function
+
+Public Function ThunkAction(ByVal ThunkProc As String) As Action
+    ThunkAction.Type = ActionType.THUNK
+    ThunkAction.Payload = ThunkProc
+End Function
+
+' ミドルウェアモジュール (Middleware.bas)
+Public Function LoggingMiddleware(ByVal Action As Action) As Action
+    Debug.Print "Action dispatched: " & Action.Type & ", Payload: " & CStr(Action.Payload)
+    LoggingMiddleware = Action
+End Function
+
+Public Function ValidationMiddleware(ByVal Action As Action) As Action
+    Dim ValidatedAction As Action
+    ValidatedAction = Action
+    
+    Select Case Action.Type
+        Case ActionType.ADD
+            If IsNumeric(Action.Payload) Then
+                If Action.Payload < -100 Or Action.Payload > 100 Then
+                    Debug.Print "Warning: ADD action payload out of range (-100 to 100). Clamping value."
+                    ValidatedAction.Payload = Application.WorksheetFunction.Min(Application.WorksheetFunction.Max(Action.Payload, -100), 100)
+                End If
+            Else
+                Debug.Print "Error: ADD action payload is not numeric. Ignoring action."
+                ValidatedAction.Type = ActionType.NOOP
+            End If
+    End Select
+    
+    ValidationMiddleware = ValidatedAction
+End Function
+
+Public Function AsyncMiddleware(ByVal Action As Action) As Action
+    If Action.Type = ActionType.ASYNC_INCREMENT_START Then
+        Application.OnTime Now + TimeValue("00:00:03"), "CompleteAsyncIncrement"
+        Debug.Print "AsyncMiddleware: Started async increment"
+    End If
+    AsyncMiddleware = Action
+End Function
+
+Public Function ThunkMiddleware(ByVal Action As Action) As Action
+    If Action.Type = ActionType.THUNK Then
+        Application.Run CStr(Action.Payload)
+        ThunkMiddleware.Type = ActionType.NOOP
+    Else
+        ThunkMiddleware = Action
+    End If
+End Function
+
+' 非同期処理完了時に呼び出される関数
+Public Sub CompleteAsyncIncrement()
+    Dispatch AsyncIncrementCompleteAction()
+End Sub
+
+' 複雑な処理の例（Thunkとして使用）
+Public Sub ComplexOperation()
+    Dispatch ResetAction()
+    Dispatch AddAction(10)
+    Dispatch IncrementAction()
+    
+    If GetState().Count > 5 Then
+        Dispatch AddAction(5)
+    Else
+        Dispatch DecrementAction()
+    End If
+    
+    Dispatch AsyncIncrementAction()
+End Sub
+
+' 標準モジュールの処理をThunkとして実行する例
+Public Sub ModuleListenerThunk()
+    Debug.Print "ModuleListenerThunk: Count is now " & GetState().Count
+End Sub
+
 ' ストアモジュール (Store.bas)
 Public Type State
     Count As Integer
     IsLoading As Boolean
-    PreviousActionType As ActionType
 End Type
 
 Private CurrentState As State
@@ -90,9 +188,6 @@ Public Function Reducer(ByVal State As State, ByVal Action As Action) As State
     Dim NewState As State
     NewState = State
     
-    ' アクションタイプを記録
-    NewState.PreviousActionType = Action.Type
-    
     Select Case Action.Type
         Case ActionType.INCREMENT
             NewState.Count = State.Count + 1
@@ -118,16 +213,7 @@ End Function
 Option Explicit
 
 Public Sub OnStateChange(ByVal NewState As State)
-    Select Case NewState.PreviousActionType
-        Case ActionType.INCREMENT, ActionType.DECREMENT, ActionType.ADD
-            Debug.Print "ClassListener: Count changed to " & NewState.Count
-        Case ActionType.RESET
-            Debug.Print "ClassListener: Count was reset to " & NewState.Count
-        Case ActionType.ASYNC_INCREMENT_START
-            Debug.Print "ClassListener: Async increment started"
-        Case ActionType.ASYNC_INCREMENT_COMPLETE
-            Debug.Print "ClassListener: Async increment completed, new count is " & NewState.Count
-    End Select
+    Debug.Print "ClassListener: Count is now " & NewState.Count
 End Sub
 
 ' ユーザーフォーム (CounterForm.frm)
@@ -164,14 +250,6 @@ End Sub
 
 Public Sub OnStateChange(ByVal NewState As State)
     UpdateUI
-    
-    ' 前回のアクションタイプに基づいて追加の処理を行う
-    Select Case NewState.PreviousActionType
-        Case ActionType.RESET
-            MsgBox "Counter has been reset!", vbInformation
-        Case ActionType.ASYNC_INCREMENT_COMPLETE
-            MsgBox "Async increment completed!", vbInformation
-    End Select
 End Sub
 
 Private Sub UpdateUI()
@@ -183,7 +261,7 @@ Private Sub UpdateUI()
     End If
 End Sub
 
-' 標準モジュール (Main.bas)
+' メインモジュール (Main.bas)
 Sub Main()
     ' ミドルウェアを追加
     AddMiddleware "LoggingMiddleware"
@@ -200,27 +278,6 @@ Sub Main()
     
     ' フォームを表示
     CounterForm.Show
-End Sub
-
-' 標準モジュールの処理をThunkとして実行する例
-Public Sub ModuleListenerThunk()
-    Dim State As State
-    State = GetState()
-    
-    Select Case State.PreviousActionType
-        Case ActionType.INCREMENT
-            Debug.Print "ModuleListenerThunk: Increment occurred, new count is " & State.Count
-        Case ActionType.DECREMENT
-            Debug.Print "ModuleListenerThunk: Decrement occurred, new count is " & State.Count
-        Case ActionType.RESET
-            Debug.Print "ModuleListenerThunk: Counter was reset"
-        Case ActionType.ADD
-            Debug.Print "ModuleListenerThunk: Value was added, new count is " & State.Count
-        Case ActionType.ASYNC_INCREMENT_START
-            Debug.Print "ModuleListenerThunk: Async increment started"
-        Case ActionType.ASYNC_INCREMENT_COMPLETE
-            Debug.Print "ModuleListenerThunk: Async increment completed, new count is " & State.Count
-    End Select
 End Sub
 ```
 
