@@ -27,22 +27,19 @@
     - [2.4 各手法の比較まとめ](#24-各手法の比較まとめ)
   - [3. データセットの用意方法](#3-データセットの用意方法)
   - [4. 実装例のサンプルコード](#4-実装例のサンプルコード)
-    - [4.1 共通パート：カスタムデータセットと Few-Shot タスク作成](#41-共通パートカスタムデータセットと-few-shot-タスク作成)
-      - [4.1.1 PyTorch Dataset](#411-pytorch-dataset)
-      - [4.1.2 N-way K-shot タスク作成関数](#412-n-way-k-shot-タスク作成関数)
-    - [4.2 Prototypical Networks の実装例](#42-prototypical-networks-の実装例)
+    - [4.1 共通パート：カスタムデータセットとタスク生成](#41-共通パートカスタムデータセットとタスク生成)
+    - [4.2 Prototypical Networks の例](#42-prototypical-networks-の例)
       - [4.2.1 埋め込みネットワーク](#421-埋め込みネットワーク)
-      - [4.2.2 Prototypical Loss](#422-prototypical-loss)
-      - [4.2.3 トレーニングループ](#423-トレーニングループ)
-    - [4.3 Model-Agnostic Meta-Learning (MAML) の実装例](#43-model-agnostic-meta-learning-maml-の実装例)
-      - [4.3.1 簡易 CNN モデル](#431-簡易-cnn-モデル)
-      - [4.3.2 内ループ（fast adaptation）](#432-内ループfast-adaptation)
-      - [4.3.3 メタトレーニングループ（外ループ）](#433-メタトレーニングループ外ループ)
-    - [4.4 Relation Network の実装例](#44-relation-network-の実装例)
-      - [4.4.1 埋め込みネットワーク](#441-埋め込みネットワーク)
-      - [4.4.2 Relation Module](#442-relation-module)
-      - [4.4.3 Relation Network の Loss](#443-relation-network-の-loss)
-      - [4.4.4 トレーニングループ](#444-トレーニングループ)
+      - [4.2.2 オフラインモード（プロトタイプの事前計算と推論）](#422-オフラインモードプロトタイプの事前計算と推論)
+      - [4.2.3 オンライン適用モード](#423-オンライン適用モード)
+    - [4.3 Model-Agnostic Meta-Learning (MAML) の例](#43-model-agnostic-meta-learning-maml-の例)
+      - [4.3.1 ヘルパー関数：model\_forward\_with\_weights](#431-ヘルパー関数model_forward_with_weights)
+      - [4.3.2 オフライン適用モード](#432-オフライン適用モード)
+      - [4.3.3 オンライン適用モード](#433-オンライン適用モード)
+    - [4.4 Relation Network の例](#44-relation-network-の例)
+      - [4.4.1 Embedding Network と Relation Module](#441-embedding-network-と-relation-module)
+      - [4.4.2 オフライン適用モード](#442-オフライン適用モード)
+      - [4.4.3 オンライン適用モード](#443-オンライン適用モード)
   - [5. まとめ](#5-まとめ)
 
 ---
@@ -261,9 +258,9 @@ flowchart LR
 
 ## 3. データセットの用意方法
 
-Few-Shot Learning を行う場合、最も一般的なデータ構造は以下のように「クラスごとにフォルダを分割」して画像を配置する方法です。
+多くの Few-Shot Learning の実装では、クラスごとにサブフォルダを用意し、その中に各クラスの画像を配置するディレクトリ構造を採用します。たとえば、以下のような構造です。
 
-```
+```txt
 custom_dataset/
   classA/
     img001.jpg
@@ -277,49 +274,45 @@ custom_dataset/
   ...
 ```
 
-- 上記の `custom_dataset` 配下にクラスごとのサブフォルダがあり、その中に画像を配置。  
-- 取り扱いクラス数が多ければ、そのクラス数を増やして同様に画像を配置する。  
-- N-way K-shot 学習用に、**各クラスに数枚以上**画像があることが望ましい。  
-  - 例：5-way 1-shot かつクエリに 5 枚使う場合、最低でも 6 枚（うち 1 枚サポート、5 枚クエリ）が必要。
+この構造のもと、以下の **CustomImageDataset** クラスでは、  
 
-本書のサンプルコードでは、PyTorch を用いた簡易的な `Dataset` クラスを紹介します。
+- ルートディレクトリ配下のサブフォルダ名をクラス名とし、  
+- 各クラス内の画像ファイル（拡張子が `.jpg`, `.jpeg`, `.png` など）を読み込み、  
+- 画像パスと対応するクラスインデックスのタプルを内部リスト `samples` として保持します。
 
----
+また、N-way K-shot タスク作成用の関数 **make_few_shot_task** は、  
 
-## 4. 実装例のサンプルコード
+- 任意の N 個のクラスをランダムに選択し、  
+- 各クラスから K 枚をサポートセット、さらに Q 枚をクエリセットとしてサンプリングする実装例です。  
+（例：5-way 1-shot + 5 query → 各クラス最低6枚の画像が必要）
 
-以下のサンプル実装には **Python 3** と **PyTorch** を利用しています。  
-実際に動かすには、`pip install torch torchvision` などで PyTorch と関連ライブラリをインストールしてください。
-
-### 4.1 共通パート：カスタムデータセットと Few-Shot タスク作成
-
-#### 4.1.1 PyTorch Dataset
+以下に最適化したコード例を示します。
 
 ```python
 import os
+import random
 from PIL import Image
 import torch
 from torch.utils.data import Dataset
 import torchvision.transforms as T
 
+# --- カスタムデータセットクラス ---
 class CustomImageDataset(Dataset):
     def __init__(self, root_dir, transform=None):
         """
-        root_dir: データセットのルートディレクトリ (例: "custom_dataset/")
-        transform: 前処理 (transforms.Compose など)
+        Args:
+            root_dir (str): 画像データセットのルートディレクトリ（例："custom_dataset/"）
+            transform (callable, optional): 画像に適用する前処理。指定がない場合は ToTensor() を使用。
         """
         self.root_dir = root_dir
         self.transform = transform if transform else T.ToTensor()
-
-        # クラス名の一覧を取得 (サブフォルダ名)
-        self.classes = sorted(os.listdir(root_dir))
-
-        # 画像ファイルパスと所属クラスインデックスをすべてリスト化
+        
+        # サブフォルダ名をクラス名として取得（ソートして一定順序に）
+        self.classes = sorted([d for d in os.listdir(root_dir)
+                               if os.path.isdir(os.path.join(root_dir, d))])
         self.samples = []
         for idx, cls_name in enumerate(self.classes):
             cls_folder = os.path.join(root_dir, cls_name)
-            if not os.path.isdir(cls_folder):
-                continue  # フォルダ以外は無視
             for fname in os.listdir(cls_folder):
                 if fname.lower().endswith(('.jpg', '.jpeg', '.png')):
                     img_path = os.path.join(cls_folder, fname)
@@ -334,358 +327,348 @@ class CustomImageDataset(Dataset):
         if self.transform:
             image = self.transform(image)
         return image, label
-```
 
-#### 4.1.2 N-way K-shot タスク作成関数
-
-Few-Shot Learning は「クラスをランダムに N 個選び出し、さらに各クラスから K+Q 枚の画像をサンプリングし、K 枚をサポートセット・Q 枚をクエリセットにする」という操作を頻繁に行います。以下の関数 `make_few_shot_task` は、その操作を簡単に実装したものです。
-
-```python
-import random
-
+# --- N-way K-shot タスク作成関数 ---
 def make_few_shot_task(dataset, N=5, K=1, Q=5):
     """
-    dataset から N-way K-shot タスクを作成し、
-    クエリとして各クラス Q 枚ずつサンプリング。
-    戻り値: (support_paths, support_labels), (query_paths, query_labels)
-    ※ ここでは実際のイメージTensorを返すのではなく、画像パスを返す。
-       実際に学習時に transform をかけてロードするようにするため。
+    dataset から N-way K-shot タスクを作成します。
+    
+    各クラスから K 枚をサポートセット、さらに Q 枚をクエリセットとしてランダムサンプリングします。
+    
+    Returns:
+        (support_paths, support_labels), (query_paths, query_labels)
+        ※ ここでは画像パスを返します。実際の読み込みは後で transform を適用して行います。
     """
-    classes = dataset.classes
-    # N クラスをランダムに選択
-    selected_classes = random.sample(classes, N)
-    # 選択されたクラス名 -> 新たなラベル(0〜N-1)
+    # dataset.classes に格納された全クラスから N クラスを選択
+    selected_classes = random.sample(dataset.classes, N)
+    # 選択クラスを 0～N-1 のラベルに変換する辞書
     class_to_new_label = {cls_name: i for i, cls_name in enumerate(selected_classes)}
-
-    # 選択クラスの画像ファイルをまとめる
-    class_to_images = {c: [] for c in selected_classes}
+    
+    # 選択クラスの画像パスをまとめる
+    class_to_images = {cls_name: [] for cls_name in selected_classes}
     for img_path, label_idx in dataset.samples:
         cls_name = dataset.classes[label_idx]
         if cls_name in selected_classes:
             class_to_images[cls_name].append(img_path)
-
+    
     support_images, support_labels = [], []
     query_images, query_labels = [], []
-
-    # 各クラスから (K + Q) 枚サンプリング
     for cls_name in selected_classes:
         all_imgs = class_to_images[cls_name]
+        # (K + Q) 枚以上の画像があることを前提
         selected_imgs = random.sample(all_imgs, K + Q)
-
-        # 前半K枚 -> サポート, 後半Q枚 -> クエリ
-        s = selected_imgs[:K]
-        q = selected_imgs[K:K+Q]
-
+        # 前半 K 枚 → サポート、残り Q 枚 → クエリ
         new_label = class_to_new_label[cls_name]
-        for sp in s:
-            support_images.append(sp)
-            support_labels.append(new_label)
-        for qp in q:
-            query_images.append(qp)
-            query_labels.append(new_label)
-
+        support_images.extend(selected_imgs[:K])
+        support_labels.extend([new_label] * K)
+        query_images.extend(selected_imgs[K:K+Q])
+        query_labels.extend([new_label] * Q)
+    
     return (support_images, support_labels), (query_images, query_labels)
 ```
 
 ---
 
-### 4.2 Prototypical Networks の実装例
+## 4. 実装例のサンプルコード
+
+以下では、**Few-Shot Learning** の代表的手法のサンプル実装例として、  
+
+- **Prototypical Networks**  
+- **Model-Agnostic Meta-Learning (MAML)**  
+- **Relation Network**  
+
+の各手法における、**オフライン（事前学習済み・固定モデルとして推論）** と **オンライン適用（新タスク到来時に即時適応）** の利用例を紹介します。  
+  
+### 4.1 共通パート：カスタムデータセットとタスク生成
+
+前節で定義した `CustomImageDataset` と `make_few_shot_task` をそのまま利用します。
+
+### 4.2 Prototypical Networks の例
 
 #### 4.2.1 埋め込みネットワーク
 
-入力画像を高次元の特徴ベクトルに埋め込む CNN（`EmbeddingNet`）を用意します。  
-以下では ResNet18 をベースにし、最終層を取り除いた 512 次元の埋め込みを取得する例を示します。
+ResNet18 の最終全結合層を除去して 512 次元の特徴ベクトルを得る例です。
 
 ```python
-import torch
 import torch.nn as nn
 from torchvision.models import resnet18
 
 class EmbeddingNet(nn.Module):
     def __init__(self):
         super().__init__()
-        base_model = resnet18(pretrained=False)
-        # 最終の全結合層(fc)を除去
+        base_model = resnet18(pretrained=True)
+        # 最終の全結合層(fc)を除去して特徴抽出器として利用
         self.features = nn.Sequential(*list(base_model.children())[:-1])
 
     def forward(self, x):
-        x = self.features(x)  # [B, 512, 1, 1]  (ResNet18の場合)
+        x = self.features(x)  # [B, 512, 1, 1]（ResNet18 の場合）
         x = x.view(x.size(0), -1)  # [B, 512]
         return x
 ```
 
-#### 4.2.2 Prototypical Loss
+#### 4.2.2 オフラインモード（プロトタイプの事前計算と推論）
 
-Prototypical Networks では「サポートセットからクラスごとにプロトタイプ（平均ベクトル）を求め、クエリとの距離で分類」を行います。  
-そのため、クエリ画像との**ユークリッド距離**を計算し、それを負の値にして softmax で各クラスの確率を求め、クロスエントロピー損失を計算します。
+サポートセットから各クラスのプロトタイプ（各クラスの埋め込みの平均）を算出し、保存・推論に利用します。
 
 ```python
-def prototypical_loss(support_embeddings, support_labels, query_embeddings, query_labels, N, K):
-    """
-    support_embeddings: shape [N*K, embed_dim]
-    support_labels:     shape [N*K]
-    query_embeddings:   shape [N*Q, embed_dim]
-    query_labels:       shape [N*Q]
-    N: way
-    K: shot
-    """
-    device = support_embeddings.device
-    embed_dim = support_embeddings.size(-1)
+import torch.optim as optim
 
-    # クラスごとにプロトタイプ(平均ベクトル)を計算
-    prototypes = torch.zeros(N, embed_dim).to(device)
+def compute_and_save_prototypes(model, support_imgs, support_labels, save_path="prototypes.pt"):
+    """
+    Args:
+        support_imgs (Tensor): [num_samples, C, H, W]
+        support_labels (Tensor): [num_samples]（ラベルは 0～N-1）
+    """
+    model.eval()
+    with torch.no_grad():
+        embeddings = model(support_imgs)  # [num_samples, embed_dim]
+    N = support_labels.max().item() + 1
+    embed_dim = embeddings.size(1)
+    prototypes = torch.zeros(N, embed_dim).to(embeddings.device)
     for c in range(N):
-        prototypes[c] = support_embeddings[support_labels == c].mean(dim=0)
+        prototypes[c] = embeddings[support_labels == c].mean(dim=0)
+    torch.save(prototypes, save_path)
+    print(f"Prototypes saved to {save_path}")
+    return prototypes
 
-    # クエリ -> プロトタイプとの距離(ユークリッド)を計算
-    distances = torch.cdist(query_embeddings, prototypes)  # [N*Q, N]
+def offline_protonet_inference(model, prototypes, image, transform):
+    """
+    Args:
+        image (PIL.Image): 入力画像
+        prototypes (Tensor): [N, embed_dim]
+    """
+    model.eval()
+    with torch.no_grad():
+        input_tensor = transform(image).unsqueeze(0).cuda()
+        embedding = model(input_tensor)  # [1, embed_dim]
+        distances = torch.cdist(embedding, prototypes)  # [1, N]
+        pred = distances.argmin(dim=1).item()
+    return pred
 
-    # 距離を負にして softmax -> 各クラスの確率を計算
-    log_p_y = nn.functional.log_softmax(-distances, dim=1)  # [N*Q, N]
-
-    # 正解クラスの対数確率を取り出して平均
-    loss = -log_p_y[range(len(query_labels)), query_labels].mean()
-
-    # 精度(accuracy)を簡易的に計算
-    _, predicted = log_p_y.max(dim=1)
-    acc = (predicted == query_labels).float().mean()
-
-    return loss, acc
+# 使用例（ファイル実行時）
+if __name__ == "__main__":
+    from PIL import Image
+    transform = T.Compose([T.Resize((224, 224)), T.ToTensor()])
+    model = EmbeddingNet().cuda()
+    
+    # CustomImageDataset を用いてサポートセットを作成（例：5-way 5-shot）
+    dataset = CustomImageDataset(root_dir="custom_dataset", transform=None)
+    (support_paths, support_labels), _ = make_few_shot_task(dataset, N=5, K=5, Q=0)
+    support_imgs = torch.stack([transform(Image.open(p).convert('RGB')) for p in support_paths]).cuda()
+    support_labels_t = torch.tensor(support_labels).long().cuda()
+    
+    prototypes = compute_and_save_prototypes(model, support_imgs, support_labels_t, save_path="prototypes.pt")
+    
+    # 推論例：test.jpg を分類
+    image = Image.open("test.jpg").convert("RGB")
+    pred = offline_protonet_inference(model, prototypes, image, transform)
+    print(f"[Offline ProtoNet] Predicted class: {pred}")
 ```
 
-#### 4.2.3 トレーニングループ
+#### 4.2.3 オンライン適用モード
 
-実際に**N-way K-shot** のエピソードを繰り返し生成し、ミニバッチとして学習を行います。以下は簡易的な例です。
+システムが常時稼働している環境では、新たなサポートセットが到着するたびにプロトタイプを再計算し、その後の画像入力に対して推論を実施できます。
 
 ```python
-from PIL import Image
-import torch.optim as optim
-import torchvision.transforms as T
+def online_protonet_system(model, transform):
+    current_prototypes = None
+    while True:
+        if new_support_set_available():
+            support_imgs, support_labels = get_new_support_set()
+            support_imgs = support_imgs.cuda()
+            support_labels = support_labels.cuda()
+            model.eval()
+            with torch.no_grad():
+                embeddings = model(support_imgs)
+            N = support_labels.max().item() + 1
+            embed_dim = embeddings.size(1)
+            prototypes = torch.zeros(N, embed_dim).to(embeddings.device)
+            for c in range(N):
+                prototypes[c] = embeddings[support_labels == c].mean(dim=0)
+            current_prototypes = prototypes
+            print("Updated prototypes for new task (ProtoNet).")
+        
+        image = receive_input_image()  # PIL.Image
+        if current_prototypes is None:
+            print("No support set available; skipping image.")
+            continue
+        pred = offline_protonet_inference(model, current_prototypes, image, transform)
+        output_prediction(pred)
 
-def train_protonet(dataset_path, num_episodes=1000, N=5, K=1, Q=5):
-    # 前処理 (必要に応じて実際の用途に合わせて設定)
-    transform = T.Compose([
-        T.Resize((224, 224)),
-        T.ToTensor()
-    ])
-    dataset = CustomImageDataset(root_dir=dataset_path, transform=None)  # transformは手動で適用する
+# ダミー関数例（実際の環境に合わせ実装してください）
+def new_support_set_available():
+    import random
+    return random.random() < 0.1  # 10% の確率で新たなサポートセット到来
 
-    # モデル・オプティマイザの用意
-    model = EmbeddingNet().cuda()
-    optimizer = optim.Adam(model.parameters(), lr=1e-3)
+def get_new_support_set():
+    # 例として、CustomImageDataset を使い 5-way 5-shot のサポートセットを生成
+    dataset = CustomImageDataset(
+        root_dir="custom_dataset",
+        transform=T.Compose([T.Resize((224, 224)), T.ToTensor()])
+    )
+    (support_paths, support_labels), _ = make_few_shot_task(dataset, N=5, K=5, Q=0)
+    support_imgs = torch.stack([T.ToTensor()(Image.open(p).convert('RGB')) for p in support_paths])
+    support_labels_t = torch.tensor(support_labels).long()
+    return support_imgs, support_labels_t
 
-    for episode in range(1, num_episodes + 1):
-        # N-way K-shot タスクを作成
-        (support_paths, support_labels), (query_paths, query_labels) = make_few_shot_task(dataset, N, K, Q)
+def receive_input_image():
+    return Image.open("test.jpg").convert("RGB")
 
-        # 画像をロードして transform + Tensor 化
-        support_imgs = torch.stack([transform(Image.open(p).convert('RGB')) for p in support_paths]).cuda()
-        query_imgs   = torch.stack([transform(Image.open(p).convert('RGB')) for p in query_paths]).cuda()
+def output_prediction(pred):
+    print(f"[Online ProtoNet] Predicted class: {pred}")
 
-        # ラベルを Tensor 化
-        support_labels_t = torch.tensor(support_labels).long().cuda()
-        query_labels_t   = torch.tensor(query_labels).long().cuda()
-
-        # 埋め込み
-        model.train()
-        optimizer.zero_grad()
-        support_emb = model(support_imgs)  # [N*K, 512]
-        query_emb   = model(query_imgs)    # [N*Q, 512]
-
-        # プロトタイプ損失
-        loss, acc = prototypical_loss(support_emb, support_labels_t, query_emb, query_labels_t, N, K)
-
-        # 逆伝搬とオプティマイザステップ
-        loss.backward()
-        optimizer.step()
-
-        if episode % 100 == 0:
-            print(f"Episode [{episode}/{num_episodes}]  Loss: {loss.item():.4f}, Acc: {acc.item():.4f}")
-
-    # 学習後のmodelがProtoNetの埋め込みネットワークとして利用可能
-    return model
+# online_protonet_system(model, transform)  # 実際の運用時に有効化
 ```
 
 ---
 
-### 4.3 Model-Agnostic Meta-Learning (MAML) の実装例
+### 4.3 Model-Agnostic Meta-Learning (MAML) の例
 
-MAML は「内ループ」と「外ループ」の二重構造を取ります。  
+MAML では、内ループでサポートセットを用いて数ステップの勾配更新（fast adaptation）を行い、外ループ（または推論時）にクエリ画像で評価します。
 
-- **内ループ**: タスク（N-way K-shot）でサポートセットを用いて勾配更新（数ステップ）  
-- **外ループ**: 内ループの結果を受けて、クエリセットの損失で初期パラメータを更新
+#### 4.3.1 ヘルパー関数：model_forward_with_weights
 
-#### 4.3.1 簡易 CNN モデル
-
-以下では、最終的に **N-way** の分類を行うシンプルな CNN を定義します。
-
-```python
-import torch.nn as nn
-
-class SimpleCNN(nn.Module):
-    def __init__(self, num_classes=5):
-        super().__init__()
-        self.conv = nn.Sequential(
-            nn.Conv2d(3, 32, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2),
-
-            nn.Conv2d(32, 64, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2),
-        )
-        # 入力画像サイズを想定 (例: 224x224 -> 2回プーリングで 56x56)
-        self.fc = nn.Linear(64 * 56 * 56, num_classes)
-
-    def forward(self, x):
-        x = self.conv(x)
-        x = x.view(x.size(0), -1)  # フラット化
-        x = self.fc(x)
-        return x
-```
-
-#### 4.3.2 内ループ（fast adaptation）
-
-以下はサポートセットを用いて数ステップの勾配更新を行い、新しいタスクに適応した「一時的な重み」（fast weights）を生成する処理例です。
+一時的なパラメータ（fast weights）を使って forward するための関数です。
 
 ```python
 def model_forward_with_weights(model, x, weights_dict):
     """
-    'weights_dict' で指定されたパラメータを使って forward を行う。
+    model のパラメータの一部を weights_dict に置き換えて forward を実行し、元の状態に戻します。
     """
-    # モデルの従来パラメータを退避し、weights_dictを一時適用してforward
-    original_parameters = {}
+    # 現在のパラメータを退避
+    original_params = {}
     for name, param in model.named_parameters():
-        original_parameters[name] = param.data.clone()
+        original_params[name] = param.data.clone()
         param.data = weights_dict[name].data
 
-    # forward
     outputs = model(x)
 
-    # 元のパラメータに戻す
+    # 元に戻す
     for name, param in model.named_parameters():
-        param.data = original_parameters[name]
-
+        param.data = original_params[name]
     return outputs
-
-def maml_inner_loop(model, support_imgs, support_labels, loss_fn, inner_lr=0.01, inner_steps=1):
-    """
-    MAMLの内ループ:
-      - サポートセットでモデルを 'inner_steps' 回更新
-      - その更新後パラメータ (fast weights) を返す
-    
-    戻り値:
-      fast_weights: { param_name: tensor } のディクショナリ
-    """
-    # モデルの現在のパラメータを辞書としてコピー
-    fast_weights = {name: p for name, p in model.named_parameters()}
-
-    for _ in range(inner_steps):
-        # 順伝搬
-        outputs = model_forward_with_weights(model, support_imgs, fast_weights)
-        loss = loss_fn(outputs, support_labels)
-
-        # 勾配計算
-        grads = torch.autograd.grad(loss, fast_weights.values(), create_graph=True)
-
-        # パラメータ更新 (SGD 例)
-        updated_fast_weights = {}
-        for (name, param), grad in zip(fast_weights.items(), grads):
-            updated_fast_weights[name] = param - inner_lr * grad
-
-        fast_weights = updated_fast_weights
-
-    return fast_weights
 ```
 
-#### 4.3.3 メタトレーニングループ（外ループ）
+#### 4.3.2 オフライン適用モード
 
-MAML の外ループでは、クエリセットでの損失を計算し、**初期パラメータ** に関する勾配を更新します。
+サポートセットに対して内ループで適応（fast weights の生成）し、その fast weights を用いて推論する例です。
 
 ```python
-import copy
+import torch.nn.functional as F
 
-def train_maml(dataset_path, meta_lr=1e-3, inner_lr=0.01, outer_steps=1000, inner_steps=1, N=5, K=1, Q=5):
-    transform = T.Compose([
-        T.Resize((224, 224)),
-        T.ToTensor()
-    ])
-    dataset = CustomImageDataset(root_dir=dataset_path)
+def maml_adapt_offline(model, support_imgs, support_labels, loss_fn, inner_lr=0.01, inner_steps=5):
+    """
+    サポートセットを用いて inner_steps 回の適応を行い、fast weights を生成して返します。
+    """
+    fast_weights = {name: param.clone() for name, param in model.named_parameters()}
+    for _ in range(inner_steps):
+        outputs = model_forward_with_weights(model, support_imgs, fast_weights)
+        loss = loss_fn(outputs, support_labels)
+        grads = torch.autograd.grad(loss, fast_weights.values(), create_graph=False)
+        fast_weights = {name: param - inner_lr * grad 
+                        for ((name, param), grad) in zip(fast_weights.items(), grads)}
+    return fast_weights
 
-    # MAML用モデル (最終出力次元を N にする)
-    model = SimpleCNN(num_classes=N).cuda()
-    meta_optimizer = optim.Adam(model.parameters(), lr=meta_lr)
+def offline_maml_inference(model, fast_weights, image, transform):
+    """
+    fast weights を用いた推論例
+    """
+    model.eval()
+    with torch.no_grad():
+        input_tensor = transform(image).unsqueeze(0).cuda()
+        outputs = model_forward_with_weights(model, input_tensor, fast_weights)
+        pred = outputs.argmax(dim=1).item()
+    return pred
+
+# 使用例（ファイル実行時）
+if __name__ == "__main__":
+    from PIL import Image
+    transform = T.Compose([T.Resize((224, 224)), T.ToTensor()])
+    # MAML 用シンプル CNN や ResNet18 ベースモデルを利用（例として MAMLResNet18）
+    import torchvision.models as models
+    class MAMLResNet18(nn.Module):
+        def __init__(self, num_classes=5):
+            super().__init__()
+            base_model = models.resnet18(pretrained=True)
+            in_features = base_model.fc.in_features
+            base_model.fc = nn.Linear(in_features, num_classes)
+            self.model = base_model
+        def forward(self, x):
+            return self.model(x)
+    
+    model = MAMLResNet18(num_classes=5).cuda()
     loss_fn = nn.CrossEntropyLoss()
 
-    for step in range(1, outer_steps + 1):
-        # 1) N-way K-shot タスクを生成
-        (support_paths, support_labels), (query_paths, query_labels) = make_few_shot_task(dataset, N, K, Q)
+    # サポートセットの生成（例：5-way 5-shot）
+    dataset = CustomImageDataset(
+        root_dir="custom_dataset",
+        transform=T.Compose([T.Resize((224, 224)), T.ToTensor()])
+    )
+    (support_paths, support_labels), _ = make_few_shot_task(dataset, N=5, K=5, Q=0)
+    support_imgs = torch.stack([transform(Image.open(p).convert('RGB')) for p in support_paths]).cuda()
+    support_labels_t = torch.tensor(support_labels).long().cuda()
 
-        # 2) 画像をロード
-        support_imgs = torch.stack([transform(Image.open(p).convert('RGB')) for p in support_paths]).cuda()
-        query_imgs   = torch.stack([transform(Image.open(p).convert('RGB')) for p in query_paths]).cuda()
-        support_labels_t = torch.tensor(support_labels).long().cuda()
-        query_labels_t   = torch.tensor(query_labels).long().cuda()
+    fast_weights = maml_adapt_offline(model, support_imgs, support_labels_t, loss_fn,
+                                      inner_lr=0.01, inner_steps=5)
+    torch.save(fast_weights, "maml_fast_weights.pt")
+    print("Adapted MAML parameters saved.")
 
-        # 3) 内ループでサポートセットを用いた更新 (fast adaptation)
-        fast_weights = maml_inner_loop(
-            model, support_imgs, support_labels_t,
-            loss_fn, inner_lr=inner_lr, inner_steps=inner_steps
-        )
+    image = Image.open("test.jpg").convert("RGB")
+    pred = offline_maml_inference(model, fast_weights, image, transform)
+    print(f"[Offline MAML] Predicted class: {pred}")
+```
 
-        # 4) クエリセットで loss を計算
-        query_outputs = model_forward_with_weights(model, query_imgs, fast_weights)
-        query_loss = loss_fn(query_outputs, query_labels_t)
+#### 4.3.3 オンライン適用モード
 
-        # 5) クエリの損失を逆伝搬して初期パラメータを更新 (外ループ)
-        meta_optimizer.zero_grad()
-        query_loss.backward()
-        meta_optimizer.step()
+新たなサポートセット到来時に即時適応（fast weights 更新）を行い、その fast weights で推論する例です。
 
-        if step % 100 == 0:
-            _, predicted = torch.max(query_outputs, dim=1)
-            acc = (predicted == query_labels_t).float().mean()
-            print(f"Step [{step}/{outer_steps}]  Query Loss: {query_loss.item():.4f}, Acc: {acc.item():.4f}")
+```python
+def online_maml_system(model, loss_fn, transform, inner_lr=0.01, inner_steps=5):
+    current_fast_weights = None
+    while True:
+        if new_support_set_available():
+            support_imgs, support_labels = get_new_support_set()  # すでに Tensor 化済み
+            support_imgs = support_imgs.cuda()
+            support_labels = support_labels.cuda()
+            current_fast_weights = maml_adapt_offline(model, support_imgs, support_labels,
+                                                      loss_fn, inner_lr, inner_steps)
+            print("Online: Updated MAML fast weights for new task.")
+        
+        image = receive_input_image()
+        if current_fast_weights is None:
+            print("No support set available; skipping image.")
+            continue
+        pred = offline_maml_inference(model, current_fast_weights, image, transform)
+        output_prediction(pred)
 
-    return model
+# online_maml_system(model, loss_fn, transform, inner_lr=0.01, inner_steps=5)
 ```
 
 ---
 
-### 4.4 Relation Network の実装例
+### 4.4 Relation Network の例
 
-#### 4.4.1 埋め込みネットワーク
+Relation Network では、まずサポートセットおよびクエリ画像を埋め込み、  
+各クエリと各クラス（もしくはそのプロトタイプ）のペアごとに類似度スコアを Relation Module により出力し、  
+そのスコアで分類を行います。
 
-まずは、サポート画像・クエリ画像を特徴空間に変換するネットワーク `EmbeddingNetRN` を定義します。  
-以下は非常にシンプルな CNN 例です。
+#### 4.4.1 Embedding Network と Relation Module
 
 ```python
-import torch.nn as nn
-
 class EmbeddingNetRN(nn.Module):
     def __init__(self):
         super().__init__()
-        # シンプルな CNN
         self.conv = nn.Sequential(
             nn.Conv2d(3, 64, kernel_size=3, padding=1),
             nn.ReLU(),
             nn.MaxPool2d(2),
-
             nn.Conv2d(64, 64, kernel_size=3, padding=1),
             nn.ReLU(),
             nn.MaxPool2d(2),
         )
-
     def forward(self, x):
-        return self.conv(x)  # [B, 64, H', W']
-```
+        return self.conv(x)  # 出力サイズ：[B, 64, H', W']
 
-#### 4.4.2 Relation Module
-
-**Relation Module** は、サポート特徴ベクトルとクエリ特徴ベクトルを結合したものを入力として、「類似度スコア（0〜1）」を返すネットワークです。  
-以下は CNN + 全結合層でシグモイド出力を返す例です。
-
-```python
 class RelationModule(nn.Module):
     def __init__(self, in_channels=128, hidden_dim=64):
         super().__init__()
@@ -693,7 +676,6 @@ class RelationModule(nn.Module):
             nn.Conv2d(in_channels, hidden_dim, kernel_size=3, padding=1),
             nn.ReLU(),
             nn.MaxPool2d(2),
-
             nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, padding=1),
             nn.ReLU(),
             nn.AdaptiveAvgPool2d(1),
@@ -701,119 +683,89 @@ class RelationModule(nn.Module):
         self.fc = nn.Linear(hidden_dim, 1)
 
     def forward(self, x):
-        # x: [B, in_channels, H, W]
         out = self.network(x)  # [B, hidden_dim, 1, 1]
-        out = out.view(out.size(0), -1)  # [B, hidden_dim]
-        out = self.fc(out)               # [B, 1]
-        return torch.sigmoid(out)        # 0〜1の範囲
+        out = out.view(out.size(0), -1)
+        out = self.fc(out)
+        return torch.sigmoid(out)  # 類似度スコア（0～1）
 ```
 
-#### 4.4.3 Relation Network の Loss
+#### 4.4.2 オフライン適用モード
 
-Relation Network では、各クエリ画像に対してすべてのサポートプロトタイプ（またはサポート画像全体）との結合を入力とし、「どのクラスと近いか」を出力スコアで表します。ここでは、ProtoNet のように**各クラスのサポートを平均**して 1 つのプロトタイプにし、そこから Relation Module に通す方法のサンプルを示します。
+サポートセットから各クラスのプロトタイプ（埋め込みの平均）を計算し、  
+クエリ画像とのペアごとに Relation Module のスコアを算出して最も高いスコアのクラスを推論します。
 
 ```python
-def relation_network_loss(embedding_net, relation_net, 
-                          support_imgs, support_labels, 
-                          query_imgs, query_labels,
-                          N, K):
-    """
-    - サポート画像をEmbeddingNetで埋め込み -> クラスごとに平均を取ってサポートプロトタイプを作成
-    - クエリ画像もEmbeddingNetで埋め込み
-    - (クエリ埋め込み, サポートプロトタイプ) をチャネル方向でconcatし、RelationModuleでスコアを得る
-    - スコアを softmax か cross-entropy で学習
-
-    戻り値: (loss, accuracy)
-    """
-    device = support_imgs.device
-
-    # 埋め込み
-    support_features = embedding_net(support_imgs)  # [N*K, 64, h, w]
-    query_features = embedding_net(query_imgs)      # [N*Q, 64, h, w]
-
-    # クラスごとにサポートを平均
+def compute_offline_relation_prototypes(embedding_net, support_imgs, support_labels):
+    embedding_net.eval()
+    with torch.no_grad():
+        support_features = embedding_net(support_imgs)  # [num_samples, 64, h, w]
+    N = support_labels.max().item() + 1
     prototypes = []
     for c in range(N):
-        class_feats = support_features[support_labels == c]  # [K, 64, h, w]
+        class_feats = support_features[support_labels == c]
         prototypes.append(class_feats.mean(dim=0, keepdim=True))
-    # [N, 64, h, w]
-    prototypes = torch.cat(prototypes, dim=0)
+    prototypes = torch.cat(prototypes, dim=0)  # [N, 64, h, w]
+    return prototypes
 
-    Q = len(query_labels) // N  # 1クラスあたりのクエリ数
+def offline_relation_inference(embedding_net, relation_net, prototypes, image, transform):
+    embedding_net.eval()
+    relation_net.eval()
+    with torch.no_grad():
+        input_tensor = transform(image).unsqueeze(0).cuda()  # [1, C, H, W]
+        query_feature = embedding_net(input_tensor)  # [1, 64, h, w]
+        N = prototypes.size(0)
+        query_expand = query_feature.expand(N, -1, -1, -1)
+        # チャネル方向に連結してペアを作成
+        relation_pairs = torch.cat([query_expand, prototypes], dim=1)  # [N, 128, h, w]
+        scores = relation_net(relation_pairs)  # [N, 1]
+        scores = scores.view(-1)
+        pred = scores.argmax().item()
+    return pred
 
-    # クエリ(N*Q) x サポートプロトタイプ(N) の組み合わせ
-    # Queryを N 回繰り返し、サポートプロトタイプを N*Q 回繰り返して組み合わせる
-    query_features_expand = query_features.unsqueeze(1).repeat(1, N, 1, 1, 1)
-    query_features_expand = query_features_expand.view(N*Q*N, support_features.size(1), support_features.size(2), support_features.size(3))
-
-    prototypes_expand = prototypes.unsqueeze(0).repeat(N*Q, 1, 1, 1, 1)
-    prototypes_expand = prototypes_expand.view(N*Q*N, support_features.size(1), support_features.size(2), support_features.size(3))
-
-    # チャネル方向でconcat -> RelationModuleへ
-    relation_pairs = torch.cat([query_features_expand, prototypes_expand], dim=1)  # [N*Q*N, 128, h, w]
-    scores = relation_net(relation_pairs)  # [N*Q*N, 1], シグモイド
-
-    # scoresを [N*Q, N] の形に変換
-    scores = scores.view(N*Q, N)
-
-    # シグモイド出力を cross-entropy 的に処理するために log_softmax を適用
-    log_p_y = torch.nn.functional.log_softmax(scores, dim=1)  # [N*Q, N]
-
-    loss = -log_p_y[range(N*Q), query_labels].mean()
-
-    _, predicted = log_p_y.max(dim=1)
-    acc = (predicted == query_labels).float().mean()
-
-    return loss, acc
-```
-
-#### 4.4.4 トレーニングループ
-
-実際の学習ループです。
-
-```python
-def train_relation_network(dataset_path, num_episodes=1000, N=5, K=1, Q=5):
-    transform = T.Compose([
-        T.Resize((128, 128)),  # ネットワークの都合でサイズ小さめに
-        T.ToTensor()
-    ])
-    dataset = CustomImageDataset(root_dir=dataset_path)
-
+# 使用例（ファイル実行時）
+if __name__ == "__main__":
+    transform = T.Compose([T.Resize((128, 128)), T.ToTensor()])
     embedding_net = EmbeddingNetRN().cuda()
     relation_net = RelationModule(in_channels=128, hidden_dim=64).cuda()
-
-    optimizer = optim.Adam(
-        list(embedding_net.parameters()) + list(relation_net.parameters()),
-        lr=1e-3
+    
+    dataset = CustomImageDataset(
+        root_dir="custom_dataset",
+        transform=T.Compose([T.Resize((128, 128)), T.ToTensor()])
     )
+    (support_paths, support_labels), _ = make_few_shot_task(dataset, N=5, K=5, Q=0)
+    support_imgs = torch.stack([T.ToTensor()(Image.open(p).convert('RGB')) for p in support_paths]).cuda()
+    support_labels_t = torch.tensor(support_labels).long().cuda()
+    
+    prototypes = compute_offline_relation_prototypes(embedding_net, support_imgs, support_labels_t)
+    
+    image = Image.open("test.jpg").convert("RGB")
+    pred = offline_relation_inference(embedding_net, relation_net, prototypes, image, transform)
+    print(f"[Offline RelationNet] Predicted class: {pred}")
+```
 
-    for episode in range(1, num_episodes + 1):
-        # タスクを作成
-        (support_paths, support_labels), (query_paths, query_labels) = make_few_shot_task(dataset, N, K, Q)
+#### 4.4.3 オンライン適用モード
 
-        # 画像をロード
-        support_imgs = torch.stack([transform(Image.open(p).convert('RGB')) for p in support_paths]).cuda()
-        query_imgs   = torch.stack([transform(Image.open(p).convert('RGB')) for p in query_paths]).cuda()
-        support_labels_t = torch.tensor(support_labels).long().cuda()
-        query_labels_t   = torch.tensor(query_labels).long().cuda()
+サポートセットが更新された場合に、プロトタイプを再計算し、以降の入力画像に対して推論を行います。
 
-        # 損失と精度の計算
-        optimizer.zero_grad()
-        loss, acc = relation_network_loss(
-            embedding_net, relation_net,
-            support_imgs, support_labels_t,
-            query_imgs, query_labels_t,
-            N, K
-        )
+```python
+def online_relation_network_system(embedding_net, relation_net, transform):
+    current_prototypes = None
+    while True:
+        if new_support_set_available():
+            support_imgs, support_labels = get_new_support_set()
+            support_imgs = support_imgs.cuda()
+            support_labels = support_labels.cuda()
+            current_prototypes = compute_offline_relation_prototypes(embedding_net, support_imgs, support_labels)
+            print("Online: Updated prototypes for new task (RelationNet).")
+        
+        image = receive_input_image()
+        if current_prototypes is None:
+            print("No support set available; skipping image.")
+            continue
+        pred = offline_relation_inference(embedding_net, relation_net, current_prototypes, image, transform)
+        output_prediction(pred)
 
-        # 逆伝搬とオプティマイザステップ
-        loss.backward()
-        optimizer.step()
-
-        if episode % 100 == 0:
-            print(f"Episode [{episode}/{num_episodes}]  Loss: {loss.item():.4f}, Acc: {acc.item():.4f}")
-
-    return embedding_net, relation_net
+# online_relation_network_system(embedding_net, relation_net, transform)
 ```
 
 ---
