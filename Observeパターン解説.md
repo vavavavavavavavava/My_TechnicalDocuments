@@ -59,7 +59,7 @@ PyPubSubは、Observerパターンをシンプルに実現するためのPython�
        print("  arg1 =", arg1)
        print("  arg2 =", arg2)
 
-   # "rootTopic"に対してリスナーを登録
+   # "rootTopic" に対してリスナーを登録
    pub.subscribe(listener_example, "rootTopic")
    ```
 
@@ -69,7 +69,7 @@ PyPubSubは、Observerパターンをシンプルに実現するためのPython�
    pub.sendMessage("rootTopic", arg1=123, arg2={"a": 456, "b": "abc"})
    ```
 
-   このコードを実行すると、`listener_example`が呼び出され、引数が出力されます。
+   このコードを実行すると、`listener_example` が呼び出され、引数が出力されます。
 
 ---
 
@@ -89,93 +89,339 @@ PyPubSubは、Observerパターンをシンプルに実現するためのPython�
 
 ---
 
-## 4. 応用的な使い方：StrEnumとシングルトンパターンによるグローバル状態管理
+## 4. グローバル状態管理の実装例
 
-Observerパターンの基本形に加え、トピック名の管理や状態の一元管理をより効率的に行うため、StrEnumとシングルトンパターンを組み合わせた実装例を示します。
+### 4.1 UI・Store・Processor・State の関係
 
-### 4.1 StrEnumによるトピック管理
+グローバルに扱いたいデータ（状態）を Store が一元管理し、**UI は Store に直接触らず**、**ユーザー操作（アクション）は Processor が受け取り、必要に応じて Store を更新し、更新結果を Store から UI に通知**する、というフローが考えられます。  
+以下の Mermaid 図のように、UI と Store の間を Processor が仲介し、最終的に状態が更新されると Store が UI に更新結果を送ります。
 
-Python 3.11以降では、`StrEnum`を利用してトピック名を定義できます。これにより、トピック名のタイプミスを防止し、IDEの補完機能を活用できます。
+```mermaid
+flowchart LR
+    UI -- "UITopic" --> Processor
+    Processor -- "StoreTopic (書き換え要求)" --> Store
+    Store -- "StoreTopic (状態更新通知)" --> UI
+
+    classDef ui fill:#cff,stroke:#09c,stroke-width:1px
+    classDef store fill:#fc9,stroke:#f93,stroke-width:1px
+    classDef processor fill:#cfc,stroke:#090,stroke-width:1px
+    classDef state fill:#ffc,stroke:#dd0,stroke-width:1px
+
+    UI((UI)):::ui
+    Processor((Processor)):::processor
+    Store((Store)):::store
+    State((State)):::state
+
+    Store -. 管理 .-> State
+```
+
+- **UI**  
+  - ボタンクリックなどの操作でイベントを発行（`UITopic`）  
+  - Store の状態は直接参照せず、Store からの通知（`StoreTopic`）を購読して表示を更新
+
+- **Processor**  
+  - UI から発行されたトピック（`UITopic`）を購読し、必要なロジックや外部処理を行ったうえで、Store に対し「状態をこう書き換えてください」というトピックを発行（`StoreTopic` で「書き換え要求」を送る設計の場合もあれば、別のアクションTopicを使う場合もあり）  
+  - ここで複数の UI 情報を集約したり、DB に問い合わせるなどの副作用を含む処理を行う
+
+- **Store**  
+  - Processor からの「状態変更要求」を受け取り、内部の `State` を更新  
+  - 更新後、「状態が変わった」ことを UI に通知するトピック（`StoreTopic` など）を発行  
+  - グローバルな状態 (`State`) を一貫して管理
+
+---
+
+### 4.2 コードスニペット
+
+#### 4.2.1 基底クラスの紹介コードスニペット
+
+Tkinter での画面レイアウトやイベント登録をシンプルにするために、以下のような **BaseRoot**, **BasePage**, **BaseComponent** を定義します。  
+（※ すでに他の箇所で定義済みの場合はそちらを参照してください）
+
+```python
+import abc
+import tkinter as tk
+from tkinter import ttk
+from pubsub import pub
+from ttkthemes import ThemedTk
+
+class BaseComponent(ttk.Frame, metaclass=abc.ABCMeta):
+    """再利用可能なコンポーネントの基底クラス"""
+    def __init__(self, master=None, **kwargs):
+        super().__init__(master, **kwargs)
+        self.initialize()
+        self.register_pubsub()
+
+    @abc.abstractmethod
+    def initialize(self):
+        """コンポーネント固有のUI初期化処理"""
+        pass
+
+    @abc.abstractmethod
+    def register_pubsub(self):
+        """コンポーネント固有の購読処理"""
+        pass
+
+    @abc.abstractmethod
+    def destroy_component(self):
+        """破棄処理"""
+        pass
+
+
+class BasePage(ttk.Frame, metaclass=abc.ABCMeta):
+    """画面全体の基底クラス"""
+    def __init__(self, master=None, **kwargs):
+        super().__init__(master, **kwargs)
+        self.initialize()
+        self.register_pubsub()
+
+    @abc.abstractmethod
+    def initialize(self):
+        pass
+
+    @abc.abstractmethod
+    def register_pubsub(self):
+        pass
+
+    @abc.abstractmethod
+    def destroy_page(self):
+        pass
+
+
+class BaseRoot(ThemedTk, metaclass=abc.ABCMeta):
+    """アプリケーションのルートウィンドウ基底クラス"""
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.set_theme("arc")  # テーマ設定
+        self.initialize()
+        self.register_pubsub()
+
+    @abc.abstractmethod
+    def initialize(self):
+        pass
+
+    @abc.abstractmethod
+    def register_pubsub(self):
+        pass
+
+    @abc.abstractmethod
+    def destroy_root(self):
+        pass
+```
+
+---
+
+#### 4.2.2 Topic／State／Store のクラス紹介コードスニペット
+
+##### (1) Topic クラス
+
+ここでは、「誰が発行するか」を軸にした命名で `UITopic`, `ProcessorTopic`, `StoreTopic` を用意します。  
+**Python 3.11 以降の `StrEnum`** を使って、定義ミスを減らしつつ IDE の補完も活用できます。
 
 ```python
 from enum import StrEnum
-from pubsub import pub
 
-# トピックを定義する
-class Topic(StrEnum):
-    STATE_UPDATE = "state.update"
-    EVENT_A = "event.a"
-    EVENT_B = "event.b"
+class UITopic(StrEnum):
+    """UI が発行するトピック"""
+    BUTTON_CLICK = "ui.button_click"
+    # 他にもユーザー操作系を追加
 
-# リスナーの例
-def listener_state_update(key, value):
-    print(f"State updated: {key} = {value}")
+class ProcessorTopic(StrEnum):
+    """Processor が発行するトピック"""
+    REQUEST_COUNTER_INCREMENT = "processor.request_counter_increment"
+    # 他にも外部問い合わせ完了などを通知するトピックを追加
 
-# リスナー登録
-pub.subscribe(listener_state_update, Topic.STATE_UPDATE.value)
-
-# メッセージ送信
-pub.sendMessage(Topic.STATE_UPDATE.value, key="counter", value=1)
+class StoreTopic(StrEnum):
+    """Store が発行するトピック"""
+    COUNTER_UPDATED = "store.counter_updated"
+    # 他にも state が更新された際の通知を追加
 ```
 
-### 4.2 シングルトンパターンによるグローバル状態管理
+##### (2) State クラス
 
-シングルトンパターンを用いることで、どのモジュールからも同じ状態管理オブジェクト（StateManager）を共有できます。これにより、アプリケーション全体のグローバルな状態を一元的に管理できます。
+アプリケーションが扱うグローバルな状態を定義します。  
+ここでは `dataclasses.dataclass` を用いて、読みやすく簡潔にしています。
 
 ```python
-# シングルトンパターンを用いた状態管理クラス
-class StateManager:
+from dataclasses import dataclass
+
+@dataclass
+class AppState:
+    """アプリがグローバルに保持する状態を定義"""
+    counter: int = 0
+    user_name: str = ""
+```
+
+##### (3) Store クラス (Singleton)
+
+**Store** はアプリケーション全体の状態を一元管理するシングルトンです。  
+Processor からのトピックを購読して state を更新し、更新後に `StoreTopic` で通知を発行します。
+
+```python
+from pubsub import pub
+
+class Store:
     _instance = None
 
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
-            cls._instance.state = {}  # 状態を保持する辞書
+            cls._instance.state = AppState()
         return cls._instance
 
-    def update_state(self, key, value):
-        self.state[key] = value
-        print(f"状態更新: {self.state}")
+    def __init__(self):
+        if not hasattr(self, "_initialized"):
+            self._initialized = True
+            # Processor が要求を発行したら購読し、state を更新
+            pub.subscribe(self.on_request_counter_increment,
+                          ProcessorTopic.REQUEST_COUNTER_INCREMENT.value)
 
-# グローバルな状態管理インスタンス
-state_manager = StateManager()
-
-# 状態更新用リスナー
-def update_state_listener(key, value):
-    state_manager.update_state(key, value)
-
-# PyPubSubのリスナーとして登録
-pub.subscribe(update_state_listener, Topic.STATE_UPDATE.value)
-
-# 任意の箇所から状態更新イベントを送信する関数
-def change_state(key, value):
-    pub.sendMessage(Topic.STATE_UPDATE.value, key=key, value=value)
-
-# 使用例
-if __name__ == '__main__':
-    change_state("counter", 1)
-    change_state("user", "Alice")
-    change_state("counter", 2)
+    def on_request_counter_increment(self):
+        """Processor がカウンター増加をリクエストしてきたときの処理"""
+        self.state.counter += 1
+        # 更新後、UI へ通知
+        pub.sendMessage(StoreTopic.COUNTER_UPDATED.value, new_value=self.state.counter)
 ```
 
-この構成では：
-- **StrEnum** により、トピック名が一元管理され、コードの信頼性と可読性が向上。
-- **StateManager** はシングルトンとして実装され、どのモジュールからStateManager()を呼び出しても同じインスタンスが返されるため、グローバルな状態が一元的に管理されます。
+---
+
+#### 4.2.3 利用例のコードスニペット（やや複雑なアプリ）
+
+以下は、上記で紹介した基底クラスや Topic／State／Store を使って、**UI → Processor → Store → UI** のフローを実現する簡易アプリケーション例です。  
+やや複雑にするため、`Processor` 側で複数の操作を行ったり、もうひとつ別のボタンを用意するなど、適宜拡張できます。
+
+```python
+import tkinter as tk
+from tkinter import ttk
+from pubsub import pub
+
+# 上記で示した基底クラス
+# from base_classes import BaseRoot, BasePage, BaseComponent
+
+# Topicクラス, Stateクラス, Storeクラスをインポート (例)
+# from store_and_topics import UITopic, ProcessorTopic, StoreTopic, Store
+
+# ========== 1. Processor ==========
+
+class MyProcessor:
+    """
+    UI のアクション (UITopic) を購読し、
+    必要に応じて ProcessorTopic を発行。
+    """
+    def __init__(self):
+        pub.subscribe(self.on_button_click, UITopic.BUTTON_CLICK.value)
+
+    def on_button_click(self):
+        """
+        UI から BUTTON_CLICK を受け取ったら、
+        Store にカウンター増やすよう依頼 (ProcessorTopic.REQUEST_COUNTER_INCREMENT)
+        """
+        # ここで、もし外部APIアクセスや複数UI情報の集約が必要なら行う
+        pub.sendMessage(ProcessorTopic.REQUEST_COUNTER_INCREMENT.value)
+
+
+# ========== 2. UI コンポーネント ==========
+
+class IncrementButtonComponent(BaseComponent):
+    """
+    ボタンコンポーネント:
+    クリック時に UITopic.BUTTON_CLICK を発行
+    """
+    def initialize(self):
+        self.button = ttk.Button(self, text="Increment Counter", command=self.on_button_click)
+        self.button.pack(pady=5, padx=10)
+
+    def register_pubsub(self):
+        # このコンポーネントは購読しない
+        pass
+
+    def destroy_component(self):
+        self.button.destroy()
+
+    def on_button_click(self):
+        pub.sendMessage(UITopic.BUTTON_CLICK.value)
+
+
+class CounterLabelComponent(BaseComponent):
+    """
+    ラベルコンポーネント:
+    StoreTopic.COUNTER_UPDATED を購読して表示を更新
+    """
+    def initialize(self):
+        self.label = ttk.Label(self, text="Counter: 0")
+        self.label.pack(pady=5, padx=10)
+
+    def register_pubsub(self):
+        pub.subscribe(self.on_counter_updated, StoreTopic.COUNTER_UPDATED.value)
+
+    def destroy_component(self):
+        pub.unsubscribe(self.on_counter_updated, StoreTopic.COUNTER_UPDATED.value)
+        self.label.destroy()
+
+    def on_counter_updated(self, new_value):
+        self.label.config(text=f"Counter: {new_value}")
+
+
+# ========== 3. Page クラス ==========
+
+class MainPage(BasePage):
+    """
+    ページ全体:
+    ボタンとラベルのコンポーネントを配置
+    """
+    def initialize(self):
+        self.button_component = IncrementButtonComponent(self)
+        self.button_component.pack()
+
+        self.label_component = CounterLabelComponent(self)
+        self.label_component.pack()
+
+    def register_pubsub(self):
+        pass
+
+    def destroy_page(self):
+        self.button_component.destroy_component()
+        self.label_component.destroy_component()
+
+
+# ========== 4. ルートウィンドウ (アプリ) ==========
+
+class MyApp(BaseRoot):
+    def initialize(self):
+        self.title("Observer & PyPubSub Demo")
+        self.geometry("300x200")
+
+        # MainPage を配置
+        self.page = MainPage(self)
+        self.page.pack(expand=True, fill="both")
+
+        # Store (シングルトン) を生成
+        self.store = Store()
+
+        # Processor を生成 (UIアクション購読 → Store要求)
+        self.processor = MyProcessor()
+
+    def register_pubsub(self):
+        pass
+
+    def destroy_root(self):
+        self.page.destroy_page()
+        self.destroy()
+
+
+# ========== 5. 起動スクリプト ==========
+
+if __name__ == "__main__":
+    app = MyApp()
+    app.mainloop()
+```
 
 ---
 
-## まとめ
+### 4.3 まとめ
 
-- **Observerパターン**  
-  発行者と購読者を明確に分離することで、疎結合な設計と拡張性・保守性の向上を実現します。  
-  （Mermaid図による視覚的な理解も有効です）
+- **UI** は「ユーザー操作」に基づいて `UITopic` を発行し、グローバル状態には直接触れません。  
+- **Processor** は UI からのアクションを受け取り、必要であれば外部リソースを参照したり、集約したデータを元に `ProcessorTopic` で Store に要求を出します。  
+- **Store** はシングルトンとしてグローバルな `AppState` を一元管理し、Processor からの要求を受けて状態を更新し、更新後に `StoreTopic` で UI に通知します。  
+- UI のコンポーネントは `StoreTopic` を購読しており、カウンターやユーザー名などが更新されると、そのイベントを受け取って画面を再描画します。  
 
-- **PyPubSubの基本**  
-  PyPubSubを利用すると、各コンポーネント間でトピックを介したメッセージの発行・購読が容易になり、直接依存を避けることができます。
-
-- **応用的な使い方**  
-  StrEnumを使ってトピック名を管理することでタイプミスを防ぎ、シングルトンパターンを用いることでグローバルな状態を一元管理できます。これにより、アプリ全体で柔軟かつ堅牢なイベント駆動型の設計が可能になります。
-
-このように、Observerパターンの基盤を活用し、PyPubSubと適切な設計パターンを組み合わせることで、保守性と拡張性に優れたシステム構築が実現できます。
-
----
+このように、**UI ↔ Processor ↔ Store** というそれぞれの責務を明確化した設計をとることで、**疎結合・拡張性の高い**アプリケーションを構築できます。
