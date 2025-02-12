@@ -99,7 +99,7 @@ PyPubSubは、Observerパターンをシンプルに実現するためのPython�
 ```mermaid
 flowchart LR
     UI -- "UITopic" --> Processor
-    Processor -- "StoreTopic (書き換え要求)" --> Store
+    Processor -- "ProcessorTopic (書き換え要求)" --> Store
     Store -- "StoreTopic (状態更新通知)" --> UI
 
     classDef ui fill:#cff,stroke:#09c,stroke-width:1px
