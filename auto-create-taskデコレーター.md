@@ -1,188 +1,156 @@
-以下は、グローバルなイベントループ（MAIN_LOOP）を採用した場合のデコレーターの紹介文書の例です。  
-このドキュメントでは、デコレーターの機能、魅力、こだわり、そしてなぜグローバルなイベントループを利用する設計になっているのかを説明しています。
+# auto_create_task デコレーターの紹介
+
+このドキュメントでは、**auto_create_task** デコレーターについて説明します。このデコレーターは、tkinter の `mainloop` と asyncio のイベントループが共存する環境で、非同期タスクの実行を容易にし、UI の応答性を維持しながら「同期的な」結果取得を実現するために設計されています。
 
 ---
 
-```markdown
-# auto_create_task デコレーター紹介
-
 ## 概要
 
-`auto_create_task` デコレーターは、同期関数と非同期関数の双方を統一的に扱い、用途に合わせた実行方式（ブロッキング実行と非ブロッキング実行）を提供する高機能なデコレーターです。  
-特に、pypubsub などのイベント駆動型アプリケーションにおいて、関数のシグネチャやキーワード引数をそのまま伝播しながら、非同期処理をシームレスに統合できる点が魅力です。
+`auto_create_task` は、関数（同期関数および非同期関数）の実行を自動的に非同期タスクとして登録するためのデコレーターです。  
+主な特徴は以下の通りです：
 
-## 主な機能
+- **wait=False モード**  
+  - 非同期関数の場合は `loop.create_task()` を用いてタスク化し、Future を返します。  
+  - 同期関数の場合は `run_in_executor()` によりバックグラウンドで実行し、その Future を返します。
 
-- **同期/非同期関数の統一サポート**  
-  - **非同期関数の場合**  
-    - `wait=False`（デフォルト）: 既に実行中のイベントループ上でタスクをスケジュールし、タスクオブジェクトを返します。  
-      ※このモードでは、実行時に「動作中のイベントループ」が必須です。  
-    - `wait=True`: イベントループが動作していない状態であれば `asyncio.run()` を用いてブロッキング実行し、結果を返します。  
-      ※すでにループが動作中の場合はエラーとなります。
+- **wait=True モード**  
+  - 内部でタスクを生成し、そのタスクの結果を `await` する async ラッパーを返します。  
+  - 非同期関数および同期関数の両方に対応しており、await 中は他のタスク（例えば UI 更新処理）に制御が戻るため、UI フリーズを防止できます。  
+  - このモードでは、呼び出し側は async コンテキスト内で `await` により結果を取得する必要があります。
 
-  - **同期関数の場合**  
-    - `wait=False`: `run_in_executor` を利用して、別スレッドで関数を実行し Future／Task を返します。  
-    - `wait=True`: イベントループが動作していない状態なら、`asyncio.run()` によりブロッキング実行し結果を返します。
-
-- **キーワード引数とシグネチャの保持**  
-  `functools.partial` および `functools.wraps` を利用することで、元の関数のシグネチャやキーワード引数を正確に保持し、pypubsub など外部ライブラリと連携する際にも情報が失われません。
-
-## グローバルイベントループ（MAIN_LOOP）の採用理由
-
-- **非待機モード（wait=False）での実行要件**  
-  非待機モードでは、既に実行中のイベントループが存在していることを前提としています。  
-  単に「新しいループを作成して set_event_loop()」するだけでは、そのループは自動的に動作状態（`run_forever()` や `run_until_complete()` で回される状態）にならないため、タスクがスケジュールされても実際に実行される保証がありません。
-
-- **グローバルなフォールバックのメリット**  
-  グローバル変数（MAIN_LOOP）としてイベントループを管理することで、  
-  - 必要なときに一元的にループを起動し、各タスクを確実に実行できる環境を提供  
-  - 複数箇所からの呼び出しに対して、同一のイベントループを共有できる  
-  というメリットがあります。
-
-> **注意:**  
-> 既にイベントループが適切に管理されているアプリケーションでは、グローバルな MAIN_LOOP は必須ではありません。  
-> しかし、イベントループの存在が保証できない環境（例: pypubsub の同期コールバックから非同期処理を発火する場合）では、グローバルなフォールバックは便利な設計となります。
+---
 
 ## 実装例
 
-以下は、グローバル変数 MAIN_LOOP を用いたデコレーターの実装例です。
+以下は、wait オプションに応じた動作を実現する完成版のデコレーターのコードです。
 
 ```python
 import asyncio
 import functools
 
-# グローバルな待機用イベントループ（フォールバックとして利用）
-MAIN_LOOP = None
-
 def auto_create_task(*, wait=False, executor=None):
-    """
-    同期関数・非同期関数の両方に対応するデコレーター
-
-    [非同期関数の場合]
-      - wait=False: 既存の実行中イベントループ上でタスク化して返す
-      - wait=True : イベントループが動作していなければ asyncio.run() で同期実行し結果を返す
-
-    [同期関数の場合]
-      - wait=False: run_in_executor() により非同期実行（Future/Task を返す）
-      - wait=True : イベントループが動作していなければ asyncio.run() でブロッキング実行し結果を返す
-    """
     def decorator(func):
         is_coro = asyncio.iscoroutinefunction(func)
-        @functools.wraps(func)
-        def wrapper(*args, **kwargs):
-            if is_coro:
-                # 非同期関数の場合
-                coro = func(*args, **kwargs)
-                if wait:
-                    try:
-                        # 既に実行中のイベントループがある場合はブロッキング実行できない
-                        loop = asyncio.get_running_loop()
-                        if loop.is_running():
-                            raise RuntimeError("wait=True は実行中のイベントループ内では利用できません。直接 await してください。")
-                    except RuntimeError:
-                        return asyncio.run(coro)
-                else:
-                    try:
-                        loop = asyncio.get_running_loop()
-                    except RuntimeError:
-                        # MAIN_LOOP をフォールバックとして利用
-                        global MAIN_LOOP
-                        if MAIN_LOOP is None:
-                            MAIN_LOOP = asyncio.new_event_loop()
-                            asyncio.set_event_loop(MAIN_LOOP)
-                        loop = MAIN_LOOP
-                    return loop.create_task(coro)
-            else:
-                # 同期関数の場合
-                call_func = functools.partial(func, *args, **kwargs)
+        if wait:
+            # wait=True の場合、内部でタスクを生成し await して結果を返す async ラッパー
+            @functools.wraps(func)
+            async def wrapper(*args, **kwargs):
                 try:
                     loop = asyncio.get_running_loop()
                 except RuntimeError:
-                    global MAIN_LOOP
-                    if MAIN_LOOP is None:
-                        MAIN_LOOP = asyncio.new_event_loop()
-                        asyncio.set_event_loop(MAIN_LOOP)
-                    loop = MAIN_LOOP
-                future = loop.run_in_executor(executor, call_func)
-                if wait:
-                    try:
-                        loop = asyncio.get_running_loop()
-                        if loop.is_running():
-                            raise RuntimeError("wait=True は実行中のイベントループ内では利用できません。直接 await してください。")
-                    except RuntimeError:
-                        async def _await_future():
-                            return await future
-                        return asyncio.run(_await_future())
+                    raise RuntimeError("実行中のイベントループが必要です。")
+                
+                if is_coro:
+                    task = loop.create_task(func(*args, **kwargs))
+                    return await task
                 else:
+                    call_func = functools.partial(func, *args, **kwargs)
+                    future = loop.run_in_executor(executor, call_func)
+                    return await future
+            return wrapper
+        else:
+            # wait=False の場合、単にタスク（または Future）を返す
+            @functools.wraps(func)
+            def wrapper(*args, **kwargs):
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    raise RuntimeError("実行中のイベントループが必要です。")
+                
+                if is_coro:
+                    return loop.create_task(func(*args, **kwargs))
+                else:
+                    call_func = functools.partial(func, *args, **kwargs)
+                    future = loop.run_in_executor(executor, call_func)
                     return asyncio.ensure_future(future)
-        return wrapper
+            return wrapper
     return decorator
-```
-
-## 利用例（pypubsub との連携）
-
-以下は、pypubsub のリスナーとして、このデコレーターを利用した例です。
-
-```python
-from pubsub import pub
-
-# 同期リスナー：wait=True によりブロッキング実行し、結果を返す
-@auto_create_task(wait=True)
-def sync_listener(data):
-    print("sync_listener started with:", data)
-    import time
-    time.sleep(1)
-    print("sync_listener finished with:", data)
-    return f"sync result for {data}"
-
-# 非同期リスナー：wait=False によりタスクオブジェクトを返す（後で実行される）
-@auto_create_task()
-async def async_listener(data):
-    print("async_listener started with:", data)
-    await asyncio.sleep(1)
-    print("async_listener finished with:", data)
-    return f"async result for {data}"
-
-def main():
-    # pypubsub のリスナーに登録
-    pub.subscribe(sync_listener, 'sync_event')
-    pub.subscribe(async_listener, 'async_event')
-    
-    # 同期リスナーはブロッキング実行され、結果が即座に返る
-    result_sync = pub.sendMessage('sync_event', data="Test Sync")
-    print("sync_event result:", result_sync)
-    
-    # 非同期リスナーはタスクオブジェクトを返し、後でイベントループで実行される
-    task_async = pub.sendMessage('async_event', data="Test Async")
-    print("async_event returned task:", task_async)
-    
-    # 既存のイベントループでタスクの実行を促す（例: asyncio.run() 内で処理）
-    async def runner():
-        await asyncio.sleep(2)
-    asyncio.run(runner())
-
-if __name__ == '__main__':
-    main()
-```
-
-## まとめ
-
-この `auto_create_task` デコレーターは以下の点で魅力的です。
-
-- **多用途性:**  
-  同期関数と非同期関数の双方を一つのデコレーターで扱え、実行方式を `wait` パラメーターで柔軟に選択できます。
-
-- **シグネチャ保持:**  
-  `functools.wraps` と `functools.partial` により、元の関数のシグネチャやキーワード引数を損なわずに処理できます。
-
-- **グローバルイベントループの合理的な採用:**  
-  非待機モード（wait=False）では、既に動作中のイベントループが必要です。  
-  単に新しいループを作成して `set_event_loop()` するだけでは、そのループは自動的に実行状態にならないため、タスクが実行されないリスクがあります。  
-  そのため、必要に応じたフォールバックとしてグローバルな MAIN_LOOP を利用し、タスクの確実な実行を保証しています。
-
-このデコレーターは、非同期処理と同期処理をシームレスに統合したいシナリオ、特にイベント駆動型のアプリケーション（例: pypubsub のリスナー）に最適な設計となっています。
 ```
 
 ---
 
-このような設計思想により、`auto_create_task` デコレーターは実行環境に合わせた柔軟な動作を提供し、グローバルイベントループを適切に管理することで、タスクの確実な実行を実現しています。
+## 特徴と利点
+
+### UI の応答性の確保
+
+- **非同期タスクの await**  
+  wait=True モードでは、内部でタスクを作成し、そのタスクを await することで、結果取得のためにイベントループをブロックせずに待機できます。  
+  この await 中は、他のタスク（例えば UI 更新処理）が実行されるため、UI フリーズの発生を抑えることが可能です。
+
+### 同期関数も非同期に実行
+
+- **バックグラウンド処理**  
+  同期関数も `run_in_executor()` を使って非同期に実行されるため、重い処理をUIスレッドから分離して実行できます。  
+  これにより、UI のスムーズな動作が維持されます。
+
+### 柔軟な呼び出し方法
+
+- **wait=False モード**  
+  タスク（Future）を返すため、呼び出し側で後から `await` したり、コールバックを設定したりすることで、非同期処理の結果をハンドリングできます。
+
+- **wait=True モード**  
+  呼び出し側が async コンテキスト内で `await` することで、同期的な結果取得が可能です。  
+  この場合も、await 中は他のイベントが処理されるため、UI フリーズを回避できます。
+
+---
+
+## 利用例
+
+### 非同期関数の場合 (wait=True)
+
+```python
+@auto_create_task(wait=True)
+async def async_task(x, y):
+    await asyncio.sleep(1)
+    return x + y
+
+# 呼び出し側（async コンテキスト内）
+async def main():
+    result = await async_task(3, 4)
+    print("Result:", result)
+
+asyncio.run(main())
+```
+
+### 同期関数の場合 (wait=True)
+
+```python
+@auto_create_task(wait=True)
+def sync_task(x, y):
+    import time
+    time.sleep(1)
+    return x * y
+
+# 呼び出し側（async コンテキスト内）
+async def main():
+    result = await sync_task(3, 4)
+    print("Result:", result)
+
+asyncio.run(main())
+```
+
+### wait=False モードの場合
+
+```python
+@auto_create_task(wait=False)
+async def async_task_no_wait(x, y):
+    await asyncio.sleep(1)
+    return x - y
+
+# 呼び出し側（async コンテキスト内）
+async def main():
+    task = async_task_no_wait(10, 4)
+    # 他の処理を実行中に、後で結果を await することが可能
+    result = await task
+    print("Result:", result)
+
+asyncio.run(main())
+```
+
+---
+
+## 結論
+
+`auto_create_task` デコレーターは、tkinter の `mainloop` と asyncio のイベントループが共存する環境下で、非同期タスクを簡単に管理し、UI の応答性を確保しながら「同期的」な結果取得を実現するための有用なツールです。  
+- **wait=True** モードでは、内部でタスクを生成し await することで、ブロッキングせずに結果を取得可能です。  
+- **wait=False** モードでは、Future を返すことで、柔軟な非同期処理のハンドリングが可能です。
