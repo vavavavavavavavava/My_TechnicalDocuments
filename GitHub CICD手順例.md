@@ -57,6 +57,7 @@ fastapi-project/
 ### 1.3 コード例
 
 #### app/main.py
+
 ```python
 from fastapi import FastAPI
 
@@ -72,6 +73,7 @@ if __name__ == "__main__":
 ```
 
 #### .github/workflows/deploy.yml（コンテナ無しの場合）
+
 ```yaml
 name: CI/CD Deploy (Process)
 # ワークフロー名。プロセスとしてアプリを起動するフローです。
@@ -91,6 +93,12 @@ jobs:
         uses: actions/checkout@v3
         # GitHub から最新のコードを取得。
 
+      # 追加テクニック：DeNA/setup-job-workspace-action@v2 を利用してワークスペースを切り替え
+      - name: Setup job workspace
+        uses: DeNA/setup-job-workspace-action@v2
+        with:
+          workspace-name: deploy-job
+
       - name: Set up Python environment
         run: |
           python -m venv venv
@@ -107,21 +115,40 @@ jobs:
       - name: Start FastAPI application
         run: |
           source venv/bin/activate
+          # ※ 以下の RUNNER_TRACKING_ID を空に設定することで、
+          # セルフホストランナーがジョブ終了時にバックグラウンドプロセスを自動終了するのを防ぎます。
+          export RUNNER_TRACKING_ID=
           nohup uvicorn app.main:app --host 0.0.0.0 --port 8000 &
-          # FastAPI アプリをバックグラウンドで起動。nohup によりログは nohup.out に出力される。
           sleep 5
           curl http://localhost:8000
-          # アプリ起動確認のため、curl でエンドポイントにアクセス。
+        # FastAPI アプリをバックグラウンドで起動し、起動確認のために curl でエンドポイントにアクセス。
 ```
 
-#### 1.4 概要図（Mermaid）
-```mermaid
-flowchart TD
-    A[GitHub: コードPush] --> B[CIサーバー: コードチェックアウト]
-    B --> C[Python環境構築 & テスト実行]
-    C --> D[FastAPIプロセスをバックグラウンドで起動]
-    D --> E[HTTPリクエストで動作確認]
-```
+### 1.4 RUNNER_TRACKING_ID の補足説明
+
+> **RUNNER_TRACKING_ID とは？**  
+> セルフホストランナーは、ジョブ内で起動した全ての子プロセスを管理対象として追跡し、ジョブ終了時に自動的にクリーンアップ（終了）します。この仕組みは内部的に `RUNNER_TRACKING_ID` という環境変数を利用しています。  
+>
+> **使い方:**  
+> バックグラウンドで継続して稼働させたいプロセス（例：FastAPI サーバーなど）を起動する前に、`RUNNER_TRACKING_ID` を空に設定することで、そのプロセスをランナーの管理対象から外すことができます。  
+>
+> **例:**  
+>
+> - **Linux/Unix 系:**  
+>
+>   ```bash
+>   export RUNNER_TRACKING_ID=
+>   nohup uvicorn app.main:app --host 0.0.0.0 --port 8000 &
+>   ```
+>
+> - **Windows（PowerShell）の場合:**  
+>
+>   ```powershell
+>   $env:RUNNER_TRACKING_ID = ""
+>   Start-Process python -ArgumentList "server.py"
+>   ```
+>
+> この設定を、プロセス起動直前に行うことで、ジョブ終了時の自動クリーンアップを回避し、プロセスが継続して稼働します。
 
 ---
 
@@ -130,12 +157,12 @@ flowchart TD
 ### 2.1 目的と概要
 
 - **目的:**  
-  Docker を利用して FastAPI アプリをコンテナ化し、環境依存性を解消。  
+  Docker を利用して FastAPI アプリをコンテナ化し、環境依存性を解消。
 - **背景:**  
-  Docker イメージをビルドし、GitHub Container Registry (ghcr.io) にプッシュすることで、イメージのバージョン管理や再利用性が向上します。  
+  Docker イメージをビルドし、GitHub Container Registry (ghcr.io) にプッシュすることで、イメージのバージョン管理や再利用性が向上します。
 - **ghcr.io の利用理由:**  
-  - 一元管理およびキャッシュ利用が可能。  
-  - プライベート設定によりアクセス制御も可能。  
+  - 一元管理およびキャッシュ利用が可能。
+  - プライベート設定によりアクセス制御も可能。
   - CI/CD パイプラインで自動ビルド＆プッシュのフローを整備することで、環境更新が効率的に行えます。
 
 ### 2.2 プロジェクト構成例
@@ -154,11 +181,12 @@ fastapi-project/
 ### 2.3 コード例
 
 #### Dockerfile
+
 ```dockerfile
 FROM python:3.9-slim
 
 WORKDIR /app
-COPY requirements.txt .
+COPY requirements.txt .  
 RUN pip install --no-cache-dir -r requirements.txt
 COPY ./app /app
 
@@ -166,6 +194,7 @@ CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "80"]
 ```
 
 #### .github/workflows/deploy.yml（コンテナありの場合）
+
 ```yaml
 name: CI/CD Deploy (Container)
 # ワークフロー名。Docker イメージのビルドとプッシュ、コンテナの起動を行うフローです。
@@ -200,7 +229,7 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GHCR_PAT }}
-        # PAT（GHCR_PAT）を使用して ghcr.io にログイン。Secrets に登録済みの PAT を利用。
+        # PAT（GHCR_PAT）を使用して ghcr.io にログイン。
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v4
@@ -222,6 +251,7 @@ jobs:
 ```
 
 #### 2.4 概要図（Mermaid）
+
 ```mermaid
 flowchart TD
     A[GitHub: コードPush] --> B[CIサーバー: コードチェックアウト]
@@ -238,9 +268,9 @@ flowchart TD
 ### 3.1 目的と概要
 
 - **目的:**  
-  複数のコンテナ（例: FastAPI アプリ、データベース、キャッシュ）を連携させ、Kubernetes クラスタ（Minikube や kind）上でマイクロサービスとして運用する。  
+  複数のコンテナ（例: FastAPI アプリ、データベース、キャッシュ）を連携させ、Kubernetes クラスタ（Minikube や kind）上でマイクロサービスとして運用する。
 - **背景:**  
-  Kubernetes による運用を通じて、スケーリング、ローリングアップデート、自己修復などの運用手法を学習。  
+  Kubernetes による運用を通じて、スケーリング、ローリングアップデート、自己修復などの運用手法を学習。
 - **注意:**  
   Kubernetes は実行時に Docker から containerd や CRI-O などに移行しているため、**イメージビルドは従来通り Dockerfile で行われます**が、実行環境は別のランタイムとなります。
 
@@ -263,43 +293,44 @@ fastapi-project/
 ### 3.3 Kubernetes マニフェスト例と解説
 
 #### k8s/deployment.yaml
+
 ```yaml
-apiVersion: apps/v1              # 使用する API バージョン（Deployment の標準）
-kind: Deployment                 # リソースタイプを Deployment と指定
+apiVersion: apps/v1
+kind: Deployment
 metadata:
-  name: fastapi-deployment       # Deployment の名称
+  name: fastapi-deployment
 spec:
-  replicas: 2                    # 起動する Pod 数（冗長性のため）
+  replicas: 2
   selector:
     matchLabels:
-      app: fastapi              # 管理対象の Pod を識別するラベル（template と一致させる）
+      app: fastapi
   template:
     metadata:
       labels:
-        app: fastapi            # Pod に付与するラベル（Service で利用）
+        app: fastapi
     spec:
       containers:
-      - name: fastapi           # コンテナの名前
+      - name: fastapi
         image: ghcr.io/yourusername/fastapi-project:latest
-        # 使用するイメージ。ghcr.io にプッシュ済みの最新イメージを参照
         ports:
-        - containerPort: 80     # コンテナ内でアプリがリッスンするポート
+        - containerPort: 80
 ```
 
 #### k8s/service.yaml
+
 ```yaml
-apiVersion: v1                   # Service の標準 API バージョン
-kind: Service                    # リソースタイプを Service と指定
+apiVersion: v1
+kind: Service
 metadata:
-  name: fastapi-service          # Service の名称
+  name: fastapi-service
 spec:
   selector:
-    app: fastapi                # 対象の Pod を選択するラベル（Deployment と同じ）
+    app: fastapi
   ports:
-    - protocol: TCP             # プロトコル指定（通常は TCP）
-      port: 8000                # クライアントがアクセスする Service のポート
-      targetPort: 80            # Pod 内のコンテナがリッスンするポート
-  type: NodePort                # NodePort によりローカル外部アクセスを可能に
+    - protocol: TCP
+      port: 8000
+      targetPort: 80
+  type: NodePort
 ```
 
 ### 3.4 GitHub Actions ワークフロー例（Kubernetes 編）
@@ -327,11 +358,9 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
-        # 最新コードを取得
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v2
-        # Docker Buildx をセットアップ
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v2
@@ -339,7 +368,6 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GHCR_PAT }}
-        # ghcr.io にログイン
 
       - name: Build and push Docker image for FastAPI
         uses: docker/build-push-action@v4
@@ -347,17 +375,16 @@ jobs:
           context: .
           push: true
           tags: ${{ env.IMAGE_NAME }}:latest
-        # Docker イメージをビルドして ghcr.io にプッシュ
 
       - name: Deploy to Kubernetes (Minikube)
         run: |
           kubectl apply -f k8s/deployment.yaml
           kubectl apply -f k8s/service.yaml
           kubectl rollout status deployment/fastapi-deployment
-          # Kubernetes マニフェストを適用してクラスタへデプロイし、状態を確認
 ```
 
 ### 3.5 概要図（Mermaid）
+
 ```mermaid
 flowchart TD
     A[GitHub: コードPush] --> B[CIサーバー: コードチェックアウト]
@@ -373,24 +400,70 @@ flowchart TD
 ## 4. まとめ
 
 ### GitHub Runner の取得と導入
+
 - **Self-hosted Runner の利用:**  
   GitHub の「Settings > Actions > Runners」から Runner をダウンロードし、登録・起動することで、ローカル環境における CI/CD ジョブの実行が可能となります。
 
 ### ghcr.io の利用と設定
+
 - **目的:**  
-  コンテナイメージを一元管理、バージョン管理、アクセス制御を行うため。  
+  コンテナイメージを一元管理、バージョン管理、アクセス制御を行うため。
 - **設定手順:**  
   1. GitHub リポジトリでパッケージ機能が有効か確認。  
   2. 必要なスコープ（write/read:packages など）を付与した PAT を生成し、GitHub Secrets に登録。  
-  3. ワークフロー内で `docker/login-action` を利用し、PAT を使って ghcr.io にログイン。  
+  3. ワークフロー内で `docker/login-action` を利用し、PAT を使って ghcr.io にログイン。
 - **メリット:**  
   複数環境で同じイメージを利用できるため、CI/CD フローの一貫性と効率が向上します。
 
 ### 各段階のデプロイ方法
+
 - **コンテナ無し:**  
-  Python 仮想環境を構築し、直接プロセスとして FastAPI を起動。テスト実行や curl による動作確認が可能。
+  Python 仮想環境を構築し、直接プロセスとして FastAPI を起動。  
+  ※ **重要なテクニック:**  
+  セルフホストランナーでは、ジョブ終了時に子プロセスを自動終了する仕組みが働くため、バックグラウンドでプロセスを継続させたい場合は、起動前に `RUNNER_TRACKING_ID` を空に設定してください。  
+  例（Linux/Unix 系の場合）:
+
+  ```bash
+  export RUNNER_TRACKING_ID=
+  nohup uvicorn app.main:app --host 0.0.0.0 --port 8000 &
+  ```
+
 - **コンテナあり:**  
   Dockerfile を利用してコンテナイメージをビルドし、ghcr.io にプッシュ。ローカルで Docker コンテナとして実行する流れ。
 - **Kubernetes（複数コンテナ）:**  
   複数のサービスを Kubernetes マニフェストで管理し、Minikube（または kind）上で複数 Pod を起動・連携させる。  
-  ※ Kubernetes は実行ランタイムとして Docker から containerd 等へ移行しているが、イメージビルドは従来通り Dockerfile を利用します。
+  ※ Kubernetes は実行ランタイムとして Docker から containerd 等へ移行していますが、イメージビルドは従来通り Dockerfile を利用します。
+
+### 追加テクニック：ワークスペースの切り替えによる環境分離
+
+セルフホストランナーでは、既存の本番環境が従来のワークスペースパス（例：`cicd_trial`）で動作中の場合でも、デプロイ用ジョブが直接干渉しないようにするためのテクニックがあります。  
+この手法では、以下の手順で環境を分離します：
+
+1. **既存ディレクトリのバックアップ**  
+   既存の `cicd_trial` ディレクトリを `cicd_trial.bak` などにリネームしてバックアップします。
+
+2. **新しいデプロイ専用ディレクトリの作成**  
+   例として `deploy-job` という新規ディレクトリを作成します。
+
+3. **シンボリックリンクの作成**  
+   新たに作成した `deploy-job` ディレクトリを、元のワークスペース名 `cicd_trial` へのシンボリックリンクとして設定することで、後続のジョブは新しい環境で動作します。
+
+従来は、以下のようなコマンドで手動に設定していました。
+
+```bash
+mv cicd_trial cicd_trial.bak
+mkdir -p deploy-job
+ln -s deploy-job cicd_trial
+```
+
+しかし、**DeNA/setup-job-workspace-action@v2** を利用することで、これらの操作を GitHub Actions 内で自動化できます。  
+たとえば、以下のように設定することで、ジョブ実行前に新たなワークスペースを自動的にセットアップし、既存環境との干渉を回避できます。
+
+```yaml
+- name: Setup job workspace
+  uses: DeNA/setup-job-workspace-action@v2
+  with:
+    workspace-name: deploy-job
+```
+
+この Action は、既存の作業ディレクトリをバックアップし、新たに `deploy-job` ディレクトリを作成してシンボリックリンクで置き換える処理を行います。これにより、たとえ本番環境が従来のパス `cicd_trial` で稼働していても、デプロイアクションは安全に隔離された環境で実行され、環境の衝突や干渉を防ぐことが可能となります。
