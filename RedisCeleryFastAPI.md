@@ -18,6 +18,7 @@
     - [3.2 Celeryの設定とタスクの定義](#32-celeryの設定とタスクの定義)
     - [3.3 uvicornを使ったFastAPIサーバーの起動](#33-uvicornを使ったfastapiサーバーの起動)
     - [3.4 Celeryワーカーの起動（-Q default オプションの指定）](#34-celeryワーカーの起動-q-default-オプションの指定)
+    - [3.5 複数フェーズのタスク処理とワーカーの分割](#35-複数フェーズのタスク処理とワーカーの分割)
   - [4. 動作確認](#4-動作確認)
   - [5. まとめ](#5-まとめ)
 
@@ -25,9 +26,9 @@
 
 ## 1. 概要
 
-- **FastAPI**: 軽量で高性能なPython製Webフレームワーク。
-- **Celery**: 分散タスクキューを提供する非同期タスクジョブキュー。
-- **Redis**: インメモリデータストア。Celeryのブローカーおよびバックエンドとして使用。
+- **FastAPI**: 軽量で高性能なPython製Webフレームワーク。  
+- **Celery**: 分散タスクキューを提供する非同期タスクジョブキュー。  
+- **Redis**: インメモリデータストア。Celeryのブローカーおよびバックエンドとして使用。  
 - **WSL2**: Windows上でLinux環境を実行するためのサブシステム。Redisを実行するために使用。
 
 ---
@@ -37,7 +38,7 @@
 ### 2.1 WSL2のインストールとセットアップ
 
 1. **WSLの有効化**  
-   管理者権限でPowerShellを開き、以下のコマンドを実行します.
+   管理者権限でPowerShellを開き、以下のコマンドを実行します。
 
    ```powershell
    dism.exe /online /enable-feature /featurename:VirtualMachinePlatform /all /norestart
@@ -46,6 +47,7 @@
 
 2. **再起動**  
    コンピューターを再起動します。
+
 3. **WSL2をデフォルトに設定**
 
    ```powershell
@@ -54,6 +56,7 @@
 
 4. **Linuxディストリビューションのインストール**  
    Microsoft StoreからUbuntuをインストールします。
+
 5. **Ubuntuの初期設定**  
    Ubuntuを起動し、ユーザー名とパスワードを設定します。
 
@@ -89,6 +92,7 @@
 
 1. **Pythonのインストール**  
    [Python公式サイト](https://www.python.org/downloads/windows/)からPythonをダウンロードしてインストールします。（インストール時に「Add Python to PATH」にチェックを入れてください。）
+
 2. **仮想環境の作成**
 
    ```bash
@@ -194,6 +198,84 @@ if __name__ == "__main__":
 celery -A celery_app worker -Q default --loglevel=info
 ```
 
+### 3.5 複数フェーズのタスク処理とワーカーの分割
+
+従来のシンプルなタスク実行に加え、処理内容が複数の段階に分かれている場合、Celeryの **chain** 機能を利用して、各フェーズを連続的に実行することが可能です。  
+たとえば、あるタスクが2段階の処理を行うとします。
+
+- **フェーズ1**: 高速だがメモリ消費が激しい処理。  
+  ※このフェーズはリソース消費が大きいため、ワーカーは **concurrency=1** でシリアルに処理するのが望ましい。
+
+- **フェーズ2**: 並列実行が可能な処理。  
+  ※こちらは複数のタスクを同時に処理できるよう、**concurrency=8** などの設定でワーカーを起動します。
+
+この仕組みを実装するため、タスクを以下のように定義します。
+
+```python
+# multi_phase_tasks.py
+
+from celery import Celery, chain
+
+# Celeryの設定（ブローカーとバックエンドにはRedisを使用）
+celery_app = Celery("multi_phase", broker="redis://localhost:6379/0", backend="redis://localhost:6379/0")
+
+@celery_app.task(queue="phase1")
+def phase_one(data):
+    """
+    フェーズ1：高速だがメモリを多く使用する重い前処理
+    """
+    # 例：入力データの前処理
+    processed_data = {"step1_result": data}
+    return processed_data
+
+@celery_app.task(queue="phase2")
+def phase_two(result_from_phase_one):
+    """
+    フェーズ2：並列実行可能な処理
+    """
+    # 例：前処理の結果をもとに追加計算を実施
+    final_output = {"final_result": result_from_phase_one}
+    return final_output
+```
+
+上記のタスクを **chain** を利用して連結し、FastAPIから1つのタスクIDで管理する例は以下の通りです。
+
+```python
+# app_chain.py
+
+from fastapi import FastAPI
+from multi_phase_tasks import phase_one, phase_two
+from celery import chain
+
+app = FastAPI()
+
+@app.post("/start_multi_phase")
+def start_multi_phase(data: dict):
+    """
+    クライアントからのリクエストを受け、フェーズ1とフェーズ2を連結して実行します。
+    単一のtask_idで最終結果が取得可能です。
+    """
+    task_chain = chain(phase_one.s(data), phase_two.s())
+    async_result = task_chain.apply_async()
+    return {"task_id": async_result.id}
+```
+
+#### ワーカーの起動方法
+
+それぞれのキューに対して、適切な **concurrency** 設定でワーカーを起動します。たとえば:
+
+- **フェーズ1用ワーカー（concurrency=1）**  
+  ```bash
+  celery -A multi_phase_tasks worker -Q phase1 --concurrency=1 --loglevel=info
+  ```
+
+- **フェーズ2用ワーカー（concurrency=8）**  
+  ```bash
+  celery -A multi_phase_tasks worker -Q phase2 --concurrency=8 --loglevel=info
+  ```
+
+このように、**chain** を用いてタスクを連結し、各フェーズごとに最適なワーカー設定を行うことで、全体として単一のタスクIDで結果を管理しながらも、各フェーズの特性に応じたリソース管理が実現できます。
+
 ---
 
 ## 4. 動作確認
@@ -214,17 +296,27 @@ celery -A celery_app worker -Q default --loglevel=info
    ```
 
 3. **Celeryワーカーの起動**  
-   別のターミナルで以下のコマンドを実行します。
+   - 既存のタスク用ワーカーは以下のコマンドで起動します。
 
-   ```bash
-   venv\Scripts\activate
-   celery -A celery_app worker -Q default --loglevel=info
-   ```
+     ```bash
+     celery -A celery_app worker -Q default --loglevel=info
+     ```
+
+   - 複数フェーズのタスク用ワーカーは、上記の通りそれぞれ別々に起動します。
+     - フェーズ1用:  
+       ```bash
+       celery -A multi_phase_tasks worker -Q phase1 --concurrency=1 --loglevel=info
+       ```
+     - フェーズ2用:  
+       ```bash
+       celery -A multi_phase_tasks worker -Q phase2 --concurrency=8 --loglevel=info
+       ```
 
 4. **APIエンドポイントのテスト**  
    - `http://localhost:8000/` にアクセスし、「Hello, World!」が表示されることを確認。  
    - `http://localhost:8000/add?a=3&b=5` にアクセスしてタスクIDと初期状態が返されることを確認。  
-   - 返されたタスクIDを用いて `http://localhost:8000/result/{task_id}` にアクセスし、タスクが完了していれば計算結果（例：8）が返されます。
+   - 返されたタスクIDを用いて `http://localhost:8000/result/{task_id}` にアクセスし、タスクが完了していれば計算結果（例：8）が返されます。  
+   - さらに、複数フェーズのタスク処理をテストするため、`http://localhost:8000/start_multi_phase` にPOSTリクエストを送り、単一のタスクIDで全フェーズの処理が連結されていることを確認してください。
 
 ---
 
@@ -234,9 +326,8 @@ celery -A celery_app worker -Q default --loglevel=info
 
 - **FastAPI** のエンドポイントは **app.py** に定義し、**main.py** から uvicorn を起動しています。  
 - **Celery** は Redis をブローカー・バックエンドとして利用し、タスクは "default" キューで実行するようにルーティング設定しています。  
-- Celery ワーカーは **-Q default** オプションを指定して起動することで、該当キューのタスクのみを処理します。
-
-これにより、FastAPI から非同期タスクを実行し、その結果をクライアントが取得できるシステムが構築できます。  
+- Celery ワーカーは **-Q default** オプションを指定して起動することで、該当キューのタスクのみを処理します。  
+- さらに、Celeryの **chain** 機能を用いることで、複数フェーズのタスク処理を連結し、各フェーズに応じたワーカー（フェーズ1はconcurrency=1、フェーズ2はconcurrency=8）で実行する仕組みを導入できます。これにより、単一のタスクIDで全体の結果を管理しつつ、各フェーズのリソース消費や並列度を最適化することが可能となります。
 
 **注意事項**:  
 
