@@ -1,8 +1,9 @@
 # PydanticモデルとSQLAlchemyの統合ガイド
 
-このドキュメントでは、MySQLのJSON型列を扱う際に、Python側でPydanticモデルを直接利用できるようにする2種類のSQLAlchemyカスタム型をご紹介します。  
+このドキュメントでは、MySQLのJSON型列を扱う際に、Python側でPydanticモデルを直接利用できるようにする3種類のSQLAlchemyカスタム型をご紹介します。  
 - **PydanticJSON**: 固定された1種類のPydanticモデルに対応する場合に利用します。  
 - **PydanticUnionJSON**: JSON列内に複数のデータ構造（複数のPydanticモデルのどれか）が入る可能性がある場合、Unionのような用途で利用します。
+- **PydanticDictJSON**: Dict型の型情報を利用して、辞書型のキーと値の型を検証する場合に利用します。
 
 ---
 
@@ -189,18 +190,169 @@ print(r2.data)  # => MyDataModel2(key3='another', key4=3.14)
 
 ---
 
-## 3. 両者の用途・使い分け
+## 3. PydanticDictJSON
 
-| 項目 | PydanticJSON | PydanticUnionJSON |
-| --- | --- | --- |
-| **対象データ** | 固定の1種類のデータ構造 | 複数の可能性があるデータ構造（Union） |
-| **書き込み時の変換** | 指定モデルのインスタンスを辞書に変換 | 各モデルで検証し、該当するモデルの辞書に変換 |
-| **読み出し時の処理** | 常に指定した1モデルで変換 | 複数モデルを順に検証して最初に合致したモデルのインスタンスを返す |
-| **利用シーン** | 一定の仕様に沿った設定情報、プロファイル情報等 | APIのレスポンス、イベントログ、複数の形式が混在するデータ |
+### 概要
+PydanticDictJSONは、辞書型（Dict）のキーと値の型情報を活用して、JSON列に保存される辞書データを型安全に扱うためのカスタム型です。
+- **目的**:
+  - 辞書型のキーと値の型を明示的に宣言・検証する
+  - 複雑な辞書型（ネスト構造、リストを含む辞書など）も型安全に扱う
+
+### 用途
+- **キー・値の型がパターン化された辞書**: 例えば、SensorTypeId(str) -> ValueTypeId(int) のような明確な型パターンがある辞書データ
+- **センサーデータ**: 文字列キーと数値データなど、型が決まっている場合
+- **設定データ**: 異なる型の値を持つが、構造が明確な辞書型データ
+
+### 利点
+- 辞書のキーと値の型を明示的に宣言することで、型安全性を高める
+- Pydanticの型検証機能を活用して、データの整合性を自動的に担保
+- ネストした辞書構造やリストを含む複雑な型にも対応可能
+
+### 利用例
+
+```python
+from typing import Dict, Type, Any, List, Union, get_origin, get_args, Optional
+from pydantic import BaseModel, create_model, validator
+from sqlalchemy.types import TypeDecorator, JSON
+from sqlalchemy import Column, Integer, String, create_engine
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+
+Base = declarative_base()
+
+class PydanticDictJSON(TypeDecorator):
+    """
+    Dict型の型情報を直接受け取るSQLAlchemy用のTypeDecorator
+    """
+    impl = JSON
+
+    def __init__(self, dict_type: Type, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        
+        # 型情報をチェック
+        origin = get_origin(dict_type)
+        if origin is not dict:
+            raise ValueError(f"Dict型を指定してください。与えられた型: {dict_type}")
+        
+        # 型引数を抽出
+        type_args = get_args(dict_type)
+        if len(type_args) != 2:
+            raise ValueError("Dictにはキーと値の型が必要です")
+            
+        self.key_type, self.value_type = type_args
+        
+        # 検証用のPydanticモデルを作成
+        self._create_validator_model()
+
+    def _create_validator_model(self):
+        """検証用のPydanticモデルを動的に作成"""
+        key_name = self._get_type_name(self.key_type)
+        value_name = self._get_type_name(self.value_type)
+        model_name = f'Dict{key_name}To{value_name}Model'
+        
+        # 検証用のモデルを作成
+        self.validator_model = create_model(
+            model_name,
+            data=(Dict[self.key_type, self.value_type], ...),
+            __validators__={
+                'validate_data': validator('data', pre=True)(self._validate_dict)
+            }
+        )
+
+    def _get_type_name(self, typ):
+        """型からモデル名を生成する（ネストした型にも対応）"""
+        # 型名取得のロジック（省略）...
+        return str(typ)  # 簡易版
+
+    @staticmethod
+    def _validate_dict(cls, v):
+        """辞書の検証関数"""
+        if not isinstance(v, dict):
+            raise ValueError("辞書型である必要があります")
+        return v
+
+    def process_bind_param(self, value, dialect):
+        """SQLAlchemyからDBに書き込む際の変換処理"""
+        if value is None:
+            return None
+            
+        # 辞書の場合は検証してJSON化
+        if isinstance(value, dict):
+            try:
+                # Pydanticモデルを使用して検証
+                validated = self.validator_model(data=value)
+                return validated.data
+            except Exception as e:
+                raise ValueError(f"辞書の検証に失敗しました: {str(e)}")
+            
+        raise ValueError("値は辞書である必要があります")
+
+    def process_result_value(self, value, dialect):
+        """DBから読み込んだ値をPythonオブジェクトに変換する処理"""
+        if value is None:
+            return None
+        return value  # 単純に辞書として返す
+
+# 使用例
+
+# 1. 型定義
+SensorDataType = Dict[str, int]
+NestedDataType = Dict[str, Dict[str, float]]
+
+# 2. モデル定義
+class SensorData(Base):
+    __tablename__ = 'sensor_data'
+    
+    id = Column(Integer, primary_key=True)
+    # 型を指定したカラム
+    data = Column(PydanticDictJSON(SensorDataType))
+    
+class WeatherData(Base):
+    __tablename__ = 'weather_data'
+    
+    id = Column(Integer, primary_key=True)
+    # ネストした辞書型を指定
+    city_temps = Column(PydanticDictJSON(NestedDataType))
+
+# 使用例
+def example_usage():
+    # センサーデータの作成例
+    sensor = SensorData(data={
+        "temperature": 24,
+        "humidity": 65,
+        "pressure": 1013
+    })
+    
+    # ネストした辞書の例
+    weather = WeatherData(city_temps={
+        "tokyo": {"day": 28.5, "night": 21.3},
+        "osaka": {"day": 30.1, "night": 22.8}
+    })
+    
+    return sensor, weather
+
+# セッション設定例
+engine = create_engine('mysql+pymysql://user:password@localhost/mydatabase')
+Session = sessionmaker(bind=engine)
+session = Session()
+```
+
+---
+
+## 4. 各カスタム型の比較と使い分け
+
+| 項目 | PydanticJSON | PydanticUnionJSON | PydanticDictJSON |
+| --- | --- | --- | --- |
+| **対象データ** | 固定の1種類のデータ構造 | 複数の可能性があるデータ構造（Union） | 辞書型データ（キー・値の型が明確） |
+| **書き込み時の変換** | 指定モデルのインスタンスを辞書に変換 | 各モデルで検証し、該当するモデルの辞書に変換 | 辞書のキーと値の型を検証して保存 |
+| **読み出し時の処理** | 常に指定した1モデルで変換 | 複数モデルを順に検証して最初に合致したモデルに変換 | 辞書データとして取得 |
+| **利用シーン** | 固定構造のデータ（設定、プロファイル等） | APIレスポンス、複数形式が混在するデータ | キー値の型が明確な辞書（センサーデータ、マッピング等） |
+| **主な利点** | シンプルな構造化データの型安全性 | 柔軟なデータ構造の統一的な処理 | 特に辞書型データの型検証が容易 |
+| **受け取るパラメータ** | 単一のPydanticモデルクラス | 複数のPydanticモデルクラスのタプル | Dict[キー型, 値型] の型情報 |
 
 ### まとめ
-- **PydanticJSON**は、JSON列のデータ構造が常に一定の場合にシンプルかつ型安全に扱うための手法です。  
-- **PydanticUnionJSON**は、複数のデータ構造を1つの列で扱う場合に、柔軟かつ統一的にデータ変換ロジックを実装できる方法です。  
-どちらも、SQLAlchemyとPydanticの機能を組み合わせることで、データベースとPythonコード間の変換を自動化し、開発効率とデータの整合性を向上させます。
+- **PydanticJSON**は、固定構造のデータを1つのPydanticモデルに基づいて扱う場合に適しています。  
+- **PydanticUnionJSON**は、異なる複数のデータ構造を1つの列で扱う場合に便利です。  
+- **PydanticDictJSON**は、辞書型データのキーと値の型を明示的に検証したい場合、特に特定のキー型と値型のパターンがある場合に最適です。
 
-このように用途に応じて適切なカスタム型を選択することで、MySQLのJSON列をより効果的に活用できるようになります。
+これらのカスタム型を状況に応じて適切に選択することで、SQLAlchemyとPydanticの利点を組み合わせ、MySQLのJSON列をより効果的に活用できます。特に型安全性と開発効率の向上に貢献します。
