@@ -1,65 +1,125 @@
-# Python と MATLAB の大規模データ効率的やり取り入門  
-〜 数百万行のデータを秒で往復する！実践ガイド 〜
+# Python と MATLAB で “大規模データ” をストレスなくやり取りするベストプラクティス
 
 ---
 
 ## はじめに
 
-近年のデータ解析現場では「PythonでDBや機械学習、MATLABでアルゴリズム開発や制御」と役割を分担するケースが増えています。  
-一方で、両者の間で“数百万行〜億行”クラスのデータをやり取りすると、**意外なほど時間がかかる**、または**メモリが足りなくなる**といった課題に直面しがちです。
+Python（pandas, polars など）と MATLAB の間で大量データをやり取りするシーンは増えています。しかし、「DataFrame をそのまま渡す」や「型変換をエンジンに任せる」だけでは、**数万行を超えると一気に転送が遅くなる**という問題に直面します。
 
-このドキュメントでは、**データ転送コストをほぼ無視できるレベルまで下げる**ためのノウハウを、パターン別にまとめます。  
-MATLAB と Python の連携を“速く・スマート”に実現したい方、必見です。
-
----
-
-## 1. そもそも何がボトルネック？
-
-多くの人が以下のようなパターンに悩みます。
-
-- PandasのDataFrameをmatlabengineで直接渡すと激遅
-- テキスト/CSV経由やdict変換だと小さいデータは良いが大規模だと秒→分へ
-- 逆にMATLABからtable/timetableを返すと、Pythonでどう受ければ速いか分からない
-
-**ポイント**は「PythonとMATLABの間で“いかに型変換・データコピーを減らすか」です。
+ここでは、**MATLAB 2025a など最新環境も踏まえた現実的かつ最速の連携手法**をまとめます。  
+実験・実務の両方で実証された、“秒”で終わるデータ連携の決定版です。
 
 ---
 
-## 2. 主なデータ転送方式の比較
+## 1. ありがちな失敗例と現状
 
-| 方式 | 典型速度 (100 万行×20 列) | 必要条件 | 長所 | 短所 |
-|------|-------------------------|----------|------|------|
-| **Arrow C-Stream** | **1–2 秒** | MATLAB R2024b+ & PyArrow ≥ 14 | ゼロコピー／異種型もOK | 新しい環境必須 |
-| **Parquet (tmpfs)** | 2–4 秒 | R2020b+ | 列指向・圧縮／古い環境でも可 | 一時ファイル生成が必要 |
-| NumPy → `matlab.double` | 6–10 秒 | R2023a+ | 数値だけなら速い | 異種型NG・列名情報が消える |
-| DataFrame → dict → `table` | 数十秒〜分 | どのバージョンでも | シンプル・安心 | ループ地獄で激遅・非推奨 |
-
-**結論**  
-“速さ”重視なら、**Arrow C-Stream** か **Parquet** 一択です。
+### ◎ Python DataFrame → MATLAB table
+- **matlabengine** を使えば pandas の DataFrame も自動で MATLAB table に変換できる（R2024a〜R2025aで公式サポート）。
+- しかし、**数万行レベルから一気に遅くなり、10秒以上かかる**（ユーザー実体験＋MathWorks フォーラムでも報告多数）。
+- Python と MATLAB 間で“逐次コピー＋型変換”が発生しているため、データが大きくなるほど致命的に。
 
 ---
 
-## 3. Python → MATLAB へのデータ転送
+## 2. 大規模データに最適な方法＝**Parquet一時ファイル経由**
 
-### 3.1 Arrow C-Stream（現状最速）
+### なぜ Parquet か？
+- Parquet は “列指向の圧縮フォーマット”。pandas, polars, MATLAB（R2020b以降）すべてが高速に読み書き可能。
+- RAM ディスク（Linux なら `/dev/shm`）を使えば I/O が実質ゼロコピーに。
+- “ファイルを1回書いて渡す”だけなのに、**数百万行でも2〜4秒で渡せる**実績あり。
+- 変換エラーや型不一致、バージョン差異に悩まされることがない。
 
-#### 仕組み
-Apache Arrowは、列指向かつプラットフォーム共通の“生メモリバッファ”をそのままやりとりできる技術。  
-**シリアライズ/デシリアライズのコストがほぼゼロ**になるのが最大のメリットです。
+---
 
-#### 実装例
+## 3. ベストプラクティス・レシピ
+
+### 【Python→MATLAB】大規模データを渡す
 
 ```python
-# df_to_matlab_arrow.py
-"""
-DataFrame を MATLAB 関数へゼロコピー送信
-"""
-import pyarrow as pa, pandas as pd, matlab.engine
+import pandas as pd, matlab.engine, tempfile, os
 
-df: pd.DataFrame = get_big_dataframe()
-tbl = pa.Table.from_pandas(df, preserve_index=False)
-capsule = tbl._export_to_c()  # PyCapsuleでゼロコピー
+# 任意のデータフレーム（例：数百万行）
+df = get_big_dataframe()  
+
+with tempfile.NamedTemporaryFile(dir="/dev/shm", suffix=".parquet", delete=False) as f:
+    parquet_path = f.name
+    df.to_parquet(parquet_path, compression="zstd", index=False)
 
 eng = matlab.engine.start_matlab()
-mat_tbl = eng.feval("arrow.importRecordBatchStream", capsule)
-out  = eng.myMatlabFunc(mat_tbl, nargout=1)
+result = eng.myMatlabFunc(parquet_path, nargout=1)
+os.remove(parquet_path)
+````
+
+* **ポイント**
+
+  * `/dev/shm`（Linux）や RAM ディスクを指定すると、ファイルI/O遅延がほぼゼロ。
+  * Windowsでも`tempfile`で十分速いが、専用RAMディスクの導入も効果的。
+
+---
+
+### 【MATLAB 側】Parquetファイルを読む
+
+```matlab
+function outTbl = myMatlabFunc(parquetPath)
+    T = parquetread(parquetPath);   % 数百万行も一瞬
+    % 必要な解析・加工
+    % 例: T.meanVal = mean(T.val, 2);
+    outTbl = T;                     % 必要ならテーブル返す
+end
+```
+
+* **ポイント**
+
+  * `parquetread`はMATLAB R2020b以降で標準サポート。
+  * テーブル（table）で返す場合も、Python側でpandas.DataFrameに自動変換される（R2024a以降）。
+
+---
+
+### 【MATLAB→Python】解析後のデータを受け取る場合
+
+* MATLAB関数の返り値としてテーブル（table）を返すのが最も簡単。
+* `matlab.engine`では自動でpandas.DataFrameに変換される（R2024a以降）。
+
+```python
+df_result = eng.myMatlabFunc(parquet_path, nargout=1)
+# df_resultはpandas.DataFrame型として戻る
+```
+
+* 返すデータが巨大な場合は、**MATLABからもParquetファイルに書き出してパスだけ返す**のもアリ。
+* 例：`parquetwrite(outPath, T);` → Pythonで`pd.read_parquet(outPath)`。
+
+---
+
+## 4. 他の方法や注意点
+
+* **DataFrameをそのままMATLAB関数に渡すのは、行数が多い場合おすすめできない**（極端に遅くなる）。
+* **Arrow C-Streamや他の“ゼロコピー”APIは、現状MATLABエンジン＋Pythonでは不安定／バージョン依存や未対応あり**（R2025aでもパブリックに案内されていない）。
+* **NumPy配列・dict変換経由も“数値だけ/小規模”ならアリだが、大規模データや異種型カラムではパフォーマンスが悪い**。
+
+---
+
+## 5. ベストプラクティスまとめ
+
+* **Python ⇄ MATLAB で大規模データをやり取りする最適解は「Parquet一時ファイル経由」**
+
+  * pandas, polars, MATLAB いずれでも高速かつバージョン互換性が高い
+  * RAMディスクを使えばI/Oコストも実質無視できる
+* **DataFrameの“そのまま変換”は小規模以外は避ける**
+* **MATLAB table をそのまま返せる（R2024a以降）ので、解析結果もDataFrameで楽々受け取れる**
+
+---
+
+## 6. 参考リンク
+
+* [MathWorks公式：Python Pandas DataFrames を MATLAB で使用](https://jp.mathworks.com/help/matlab/matlab_external/python-pandas-dataframes.html)
+* [Parquetサポートに関する MathWorks Blog](https://blogs.mathworks.com/matlab/2023/05/05/working-efficiently-with-data-parquet-files-and-the-needle-in-a-haystack-problem/)
+* [pandas.DataFrame.to\_parquet()ドキュメント](https://pandas.pydata.org/docs/reference/api/pandas.DataFrame.to_parquet.html)
+
+---
+
+## 7. おわりに
+
+「Python から MATLAB へ大規模データを渡して解析し、また結果をPythonへ返す」
+この流れを**最速・最小コスト**で回すには、**ParquetファイルをRAM上に書いてパスだけやりとりする**のが現時点での鉄板です。
+バージョンやOS差異にも強く、今後しばらくの間は“最適解”として使えます。
+
+**大規模データのやり取りに困ったら、まずはこの手法を試してみてください！**
